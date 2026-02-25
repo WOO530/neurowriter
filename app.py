@@ -65,6 +65,8 @@ def initialize_session():
         # Orchestrator recreation
         "api_key_stored": "",
         "model_stored": "",
+        # Additional research UI flag (Issue 2)
+        "show_additional_research": False,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -95,9 +97,11 @@ def reset_pipeline():
         "generation_result": None,
         "current_topic": None,
         "fact_check_result": None,
+        "show_additional_research": False,
     }
     for k in keys:
         st.session_state[k] = defaults.get(k)
+    st.session_state.show_additional_research = False
 
 
 def get_orchestrator() -> Optional[PipelineOrchestrator]:
@@ -142,8 +146,8 @@ def setup_sidebar():
         # Model selector
         model = st.selectbox(
             "LLM Model",
-            ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-            index=0
+            ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-5", "gpt-5.2"],
+            index=4
         )
 
         # Store for orchestrator recreation
@@ -539,10 +543,16 @@ def render_confirm_strategy_state():
         back_btn = st.button("쿼리 수정으로 돌아가기", key="back_to_queries_btn")
 
     if generate_btn:
+        st.session_state.show_additional_research = False
         st.session_state.pipeline_state = "GENERATING"
         st.rerun()
 
     if add_research_btn:
+        st.session_state.show_additional_research = True
+        st.rerun()
+
+    # Persistent additional research UI (survives Streamlit reruns)
+    if st.session_state.show_additional_research:
         st.markdown("### 추가 리서치")
         input_mode = st.radio(
             "입력 방식",
@@ -597,7 +607,12 @@ def render_confirm_strategy_state():
                 else:
                     _run_supplementary_research(queries)
 
+        if st.button("취소", key="cancel_extra_research_btn"):
+            st.session_state.show_additional_research = False
+            st.rerun()
+
     if back_btn:
+        st.session_state.show_additional_research = False
         st.session_state.pipeline_state = "CONFIRM_QUERIES"
         st.rerun()
 
@@ -630,6 +645,7 @@ def _run_supplementary_research(queries: list):
             st.session_state.writing_strategy = strategy
 
             new_count = len(expanded_pool) - old_count
+            st.session_state.show_additional_research = False
             st.success(f"추가 리서치 완료! {new_count}편 새 논문 발견. Reference pool: {len(new_ref_pool)}편")
             st.rerun()
         except Exception as e:
@@ -652,7 +668,12 @@ def render_generating_state():
             introduction = orch.generate_introduction(
                 st.session_state.topic_analysis,
                 st.session_state.reference_pool,
-                st.session_state.landscape
+                st.session_state.landscape,
+                writing_strategy=st.session_state.get("writing_strategy"),
+            )
+            # Validate citation range
+            introduction = PipelineOrchestrator.validate_citation_range(
+                introduction, len(st.session_state.reference_pool)
             )
             st.session_state.introduction_text = introduction
             st.session_state.pipeline_state = "EVALUATING"
@@ -780,25 +801,33 @@ def render_self_evolving_state():
             )
             st.write(f"  {len(new_papers)}편 새 논문 발견")
 
-            # Step 4: Expand reference pool
+            # Step 4: Expand reference pool (preserve cited papers)
             if new_papers:
                 st.write("Reference pool 확장 중...")
                 st.session_state.paper_pool = st.session_state.paper_pool + new_papers
                 new_ref_pool = orch.expand_reference_pool(
                     st.session_state.reference_pool,
                     new_papers,
-                    st.session_state.landscape
+                    st.session_state.landscape,
+                    current_introduction=st.session_state.introduction_text,
                 )
                 old_size = len(st.session_state.reference_pool)
                 st.session_state.reference_pool = new_ref_pool
                 st.write(f"  Reference pool: {old_size} -> {len(new_ref_pool)}편")
 
-            # Step 5: Regenerate introduction
+            # Step 5: Regenerate introduction with feedback
             st.write("Introduction 재작성 중...")
             introduction = orch.generate_introduction(
                 st.session_state.topic_analysis,
                 st.session_state.reference_pool,
-                st.session_state.landscape
+                st.session_state.landscape,
+                writing_strategy=st.session_state.get("writing_strategy"),
+                evaluation_feedback=st.session_state.get("evaluation_result"),
+                unsupported_claims=claims,
+            )
+            # Validate citation range
+            introduction = PipelineOrchestrator.validate_citation_range(
+                introduction, len(st.session_state.reference_pool)
             )
             st.session_state.introduction_text = introduction
 
@@ -832,19 +861,29 @@ def render_complete_state(reference_style: str = "APA"):
         label = "Draft" if iterations == 0 else f"Draft + {iterations} Rev"
         st.metric("Iterations", label)
 
-    # Iteration history tabs
+    # Iteration history tabs with version selection
     history = st.session_state.iteration_history
     if len(history) > 1:
         st.markdown("### 버전 비교")
         tab_names = [h["label"] for h in history]
         tabs = st.tabs(tab_names)
-        for tab, h in zip(tabs, history):
+        for tab_idx, (tab, h) in enumerate(zip(tabs, history)):
             with tab:
                 eval_data = h.get("evaluation", {})
                 overall = eval_data.get("overall_score", "?")
                 factual = eval_data.get("scores", {}).get("factual_accuracy", "?")
                 st.write(f"**종합 점수:** {overall}/10 | **Factual accuracy:** {factual}/10")
                 st.markdown(h["introduction"])
+
+                # Version selection button
+                is_current = (st.session_state.introduction_text == h["introduction"])
+                if is_current:
+                    st.success("현재 선택된 버전입니다")
+                else:
+                    if st.button(f"이 버전 선택 ({h['label']})", key=f"select_version_{tab_idx}"):
+                        st.session_state.introduction_text = h["introduction"]
+                        st.session_state.evaluation_result = h.get("evaluation", {})
+                        st.rerun()
     elif history:
         # Single version — show it directly
         pass
@@ -1154,11 +1193,14 @@ def run_revision(
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=2000,
+            reasoning_effort="high",
         )
 
         progress_bar.progress(1.0)
 
+        from core.pipeline_orchestrator import _normalize_paragraph_breaks
+        revised_intro = _normalize_paragraph_breaks(revised_intro)
         st.session_state.introduction_text = revised_intro
         st.session_state.current_intro = revised_intro
         st.success("✅ 수정 완료!")

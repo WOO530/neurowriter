@@ -1,11 +1,17 @@
 """Prompt templates for introduction generation"""
 
+from prompts.modality_config import SECTION_NAMES, ACADEMIC_EXAMPLES
+
 
 def get_introduction_generation_prompt(
     parsed_topic: dict,
     selected_articles: list,
     output_instructions: dict = None,
-    landscape: dict = None
+    landscape: dict = None,
+    modality: str = "eeg",
+    writing_strategy: dict = None,
+    evaluation_feedback: dict = None,
+    unsupported_claims: list = None,
 ) -> tuple[str, str]:
     """Get system and user prompts for introduction generation
 
@@ -14,11 +20,19 @@ def get_introduction_generation_prompt(
         selected_articles: List of selected article metadata dictionaries
         output_instructions: Optional output formatting instructions
         landscape: Optional literature landscape analysis (from deep research)
+        modality: Detected modality ("eeg", "psg", or "mixed")
+        writing_strategy: Optional writing strategy with paragraph outline
+        evaluation_feedback: Optional evaluation results from previous iteration
+        unsupported_claims: Optional list of unsupported claims from previous iteration
 
     Returns:
         Tuple of (system_prompt, user_prompt)
     """
-    system_prompt = """You are a lead author of a peer-reviewed medical research article in neuroscience and psychiatry, published in top-tier journals (Nature Medicine, NEJM, JAMA Psychiatry, Lancet Neurology).
+    mod = SECTION_NAMES.get(modality, SECTION_NAMES["eeg"])
+    domain_label = mod["domain_label"]
+    journal_examples = mod["journal_examples"]
+
+    system_prompt = f"""You are a lead author of a peer-reviewed medical research article in {domain_label}, published in top-tier journals (Nature Medicine, NEJM, {journal_examples}).
 
 YOUR WRITING VOICE:
 - Formal, precise, and academically rigorous
@@ -36,9 +50,13 @@ CITATION RULES (CRITICAL):
    - BAD: "Depression affects 280 million people and is the leading cause of disability [1]."
    - GOOD: "Depression affects approximately 280 million people [1] and is among the leading causes of disability worldwide [2]."
 5. Multiple Supporting Studies: When multiple studies support the same claim, cite them together using ranges: [3-5] or [3,4,5]. TARGET: 30-40% of your citations should be multiple (not single), showcasing consensus in the field.
-6. Citation Density: Aim for approximately one citation per 60-80 words (medical baseline is ~1 per 95 words, but introduction should be denser). For a 900-1300 word introduction, expect 12-20+ distinct citation points.
+6. Citation Density: Aim for approximately one citation per 60-80 words (medical baseline is ~1 per 95 words, but introduction should be denser). For a 600-800 word introduction, expect 10-15 distinct citation points.
 7. Quality Over Quantity Per Point: MAXIMUM 5 studies per single citation point [1-5]. Do not pad citations unnecessarily; use only most impactful, directly relevant papers.
 8. Sequential Numbering: Number citations sequentially as they appear in the text. If revisions occur, renumber for consistency.
+9. Claim-Source Fidelity: Each cited claim MUST match the strength and specificity of the original source.
+   - If the source reports a "trend" or "association", do NOT present it as "established" or "proven"
+   - If the source uses a specific sample, do NOT generalize to a broader population unless the source explicitly does so
+   - When uncertain about exact figures from an abstract, use approximations with hedging ("approximately", "roughly")
 
 STRUCTURAL PRINCIPLES:
 - Each paragraph should have a clear topic sentence
@@ -50,38 +68,52 @@ DO NOT:
 - Speculate beyond what is supported by provided articles
 - Use citations for definitions of the disorder or universally accepted facts
 - Include references not in the provided list
-- Vary the meaning of claims from what the original articles state"""
+- Vary the meaning of claims from what the original articles state
+- Overstate or strengthen findings beyond what the cited source reports.
+  If a study says "may contribute", do NOT write "has been established".
+  Match the hedging level of the original paper (e.g., "suggested", "may indicate", "preliminary evidence").
+- Cite a paper for a specific numerical claim (prevalence, percentage, sample size) unless the abstract explicitly states that number
 
-    # Format articles with enhanced context for the prompt
-    articles_text = _format_articles_for_prompt(selected_articles)
+SYNTHESIS REQUIREMENTS (CRITICAL):
+- Do NOT list individual study results one by one ("Study X found Y. Study Z found W.")
+- Instead, SYNTHESIZE findings across multiple papers into high-level claims supported by grouped citations
+  BAD: "Smith et al. found 85% accuracy using CNN [1]. Lee et al. achieved 90% with LSTM [2]."
+  GOOD: "Recent deep learning approaches have demonstrated promising classification accuracies (85-90%) across multiple architectures [1-3]."
+- Each paragraph should make 2-4 synthesized claims, NOT 5-8 individual study summaries
+- Specific numbers from individual papers should be used sparingly — only when a finding is particularly noteworthy or landmark
+- Group related findings thematically, not paper-by-paper"""
 
-    disease = parsed_topic.get("disease", "")
-    data_type = parsed_topic.get("data_type", "")
-    methodology = parsed_topic.get("methodology", "")
-    outcome = parsed_topic.get("outcome", "")
-    additional_context = parsed_topic.get("additional_context", "")
-    concept_hierarchy = parsed_topic.get("concept_hierarchy", [])
-    key_intervention_or_focus = parsed_topic.get("key_intervention_or_focus", "")
+    # Format articles with enhanced context for the prompt (800 char abstract limit for generation)
+    articles_text = _format_articles_for_prompt(selected_articles, max_abstract_len=800)
+
+    disease = parsed_topic.get("disease", "") or ""
+    data_type = parsed_topic.get("data_type", "") or ""
+    methodology = parsed_topic.get("methodology", "") or ""
+    outcome = parsed_topic.get("outcome", "") or ""
+    additional_context = parsed_topic.get("additional_context", "") or ""
+    concept_hierarchy = parsed_topic.get("concept_hierarchy", []) or []
+    key_intervention_or_focus = parsed_topic.get("key_intervention_or_focus", "") or ""
 
     # Determine primary focus for focus drift prevention
     primary_focus = concept_hierarchy[-1] if concept_hierarchy else key_intervention_or_focus or disease
 
-    # Few-shot examples for academic tone
-    academic_examples = """EXAMPLE PARAGRAPH STYLES (for tone reference, do NOT cite):
-
-Example 1 - Disease Background:
-"Major depressive disorder (MDD) is a prevalent and debilitating psychiatric condition, affecting approximately 280 million individuals globally [1] and ranking among the leading causes of disability worldwide [2]. Despite the availability of multiple pharmacological interventions, treatment outcomes remain suboptimal [3], with approximately one-third of patients failing to achieve adequate remission following first-line antidepressant therapy [4-5]."
-
-Example 2 - Technology/Methodology:
-"Electroencephalography (EEG), a non-invasive neurophysiological modality with high temporal resolution, has emerged as a promising tool for identifying neural biomarkers associated with treatment response in psychiatric disorders [6-8]. Recent advances in deep learning architectures, particularly convolutional neural networks (CNNs) and recurrent neural networks (RNNs), have demonstrated remarkable capacity for extracting complex spatiotemporal features from raw EEG signals that may elude conventional analytical approaches [9,10]."
-
-Example 3 - Unmet Need/Rationale:
-"Although substantial progress has been made in characterizing EEG abnormalities in MDD [11], the translation of these findings to clinical practice has been limited [12]. Current diagnostic procedures rely exclusively on clinical assessment, lacking objective biological biomarkers [13]. The identification of reliable EEG-based predictors of antidepressant response could substantially improve treatment selection and outcomes [14], representing a significant unmet clinical need."""
+    # Few-shot examples for academic tone (modality-specific)
+    academic_examples = ACADEMIC_EXAMPLES.get(modality, ACADEMIC_EXAMPLES["eeg"])
 
     # Format landscape context if available
     landscape_context = ""
     if landscape:
         landscape_context = _format_landscape_context(landscape, parsed_topic)
+
+    # Format writing strategy if available
+    strategy_context = ""
+    if writing_strategy:
+        strategy_context = _format_writing_strategy(writing_strategy)
+
+    # Format evaluation feedback for self-evolution
+    feedback_context = ""
+    if evaluation_feedback or unsupported_claims:
+        feedback_context = _format_evaluation_feedback(evaluation_feedback, unsupported_claims)
 
     # Format concept hierarchy as a narrowing chain
     concept_text = ""
@@ -111,24 +143,27 @@ RESEARCH TOPIC:
 - Additional Context: {additional_context}
 {concept_text}
 {focus_constraint}
-REQUIRED SECTIONS (in order):
+REQUIRED SECTIONS (in order — you may combine adjacent sections into a single paragraph):
 1. **Disease Background & Clinical Burden ({disease}{f' — specifically {primary_focus}' if primary_focus.lower() != disease.lower() else ''})**: Prevalence, incidence, epidemiology, disease burden, mortality/morbidity impact, current management landscape
-2. **Current Diagnostic & Treatment Limitations**: Why current approaches are inadequate, gaps in treatment response prediction, challenges in clinical practice
-3. **Neurophysiological Biomarkers**: Why {data_type} is relevant, what abnormalities have been observed, how biomarkers could improve outcomes
-4. **Machine Learning & {methodology} Applications**: State of the art in applying {methodology} to psychiatric conditions, what previous studies have shown, technological advances
-5. **Integration & Unmet Needs**: Synthesis - why combining {data_type} with {methodology} is important, what remains unclear, why this specific research is needed
-6. **Study Rationale & Aims**: Clear statement of your study's purpose, novelty, and expected contributions
+2. **Current Limitations & Emerging Biomarkers**: Why current approaches are inadequate, gaps in treatment response prediction; why {data_type} is relevant, what abnormalities have been observed, how biomarkers could improve outcomes
+3. **{methodology} Approaches**: Survey of {methodology} approaches applied to {mod["condition_label"]} — discuss specific architectures and their results as a landscape overview, highlight methodological trends and remaining challenges
+4. **Study Rationale & Aims**: Synthesis of unmet needs — why combining {data_type} with {methodology} is important, what remains unclear; clear statement of your study's purpose, novelty, and expected contributions
 
 SPECIFICATIONS:
-- LENGTH: 4-6 paragraphs, approximately 900-1300 words
+- LENGTH: 3-5 paragraphs, approximately 600-800 words. This is a STRICT upper limit — do NOT exceed 800 words. Write concisely: every sentence must earn its place.
+- FORMAT: Separate each paragraph with a blank line. Do NOT output as a single block of text.
 - TONE: Follow the academic examples provided above
-- CITATIONS: Target 12-20+ citation points across the introduction. Use 15-35 unique references total. See citation rules above for flexible strategy (1-5 per point, 30-40% multiple citations)
+- CITATIONS: Target 10-15 citation points across the introduction. Use 12-25 unique references total. See citation rules above for flexible strategy (1-5 per point, 30-40% multiple citations)
 - FLOW: Smooth transitions between sections; avoid abrupt topic changes
 - VOCABULARY: Use precise medical/neuroscience terminology
 
 {academic_examples}
 
 {landscape_context}
+
+{strategy_context}
+
+{feedback_context}
 
 PROVIDED REFERENCES (ONLY use these for citations):
 {articles_text}
@@ -187,11 +222,14 @@ def _format_landscape_context(landscape: dict, parsed_topic: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_articles_for_prompt(articles: list) -> str:
+def _format_articles_for_prompt(articles: list, max_abstract_len: int = 2000) -> str:
     """Format articles for inclusion in prompt
 
     Args:
         articles: List of article dictionaries
+        max_abstract_len: Maximum abstract length in characters.
+            Use 800 for generation (prevents over-extraction of details).
+            Use 2000 for fact-checking (needs full abstract for verification).
 
     Returns:
         Formatted string for prompt
@@ -210,8 +248,8 @@ def _format_articles_for_prompt(articles: list) -> str:
 
         abstract = article.get("abstract", "No abstract available")
         # Truncate abstract if too long
-        if len(abstract) > 2000:
-            abstract = abstract[:1997] + "..."
+        if len(abstract) > max_abstract_len:
+            abstract = abstract[:max_abstract_len - 3] + "..."
 
         # Article type label
         atype = article.get("article_type", "")
@@ -225,6 +263,97 @@ def _format_articles_for_prompt(articles: list) -> str:
         )
 
     return "\n\n".join(formatted)
+
+
+def _format_writing_strategy(writing_strategy: dict) -> str:
+    """Format writing strategy as outline for generation prompt
+
+    Args:
+        writing_strategy: Strategy dict with paragraphs, narrative_arc
+
+    Returns:
+        Formatted strategy context string
+    """
+    if not writing_strategy or writing_strategy.get("parse_error"):
+        return ""
+
+    lines = ["WRITING OUTLINE (follow this structure):"]
+
+    narrative_arc = writing_strategy.get("narrative_arc", "")
+    if narrative_arc:
+        lines.append(f"\nNarrative Arc: {narrative_arc[:300]}")
+
+    paragraphs = writing_strategy.get("paragraphs", [])
+    if paragraphs:
+        lines.append(f"\nParagraph Plan ({len(paragraphs)} paragraphs):")
+        for i, para in enumerate(paragraphs, 1):
+            topic = para.get("topic", "")
+            key_points = para.get("key_points", [])
+            transition = para.get("transition_to_next", "")
+            supporting = para.get("supporting_papers", [])
+
+            lines.append(f"\n  Paragraph {i}: {topic}")
+            for kp in key_points[:4]:
+                lines.append(f"    - {kp[:150]}")
+            if supporting:
+                refs_str = ", ".join(str(s) for s in supporting[:8])
+                lines.append(f"    Suggested refs: [{refs_str}] (reference numbers are from original pool — re-match by topic if pool has changed)")
+            if transition:
+                lines.append(f"    Transition: {transition[:100]}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_evaluation_feedback(evaluation_feedback: dict, unsupported_claims: list) -> str:
+    """Format evaluation feedback and unsupported claims for self-evolution
+
+    Args:
+        evaluation_feedback: Evaluation results dict with scores and feedback
+        unsupported_claims: List of claim dicts with 'claim', 'issue', 'needed_evidence'
+
+    Returns:
+        Formatted feedback context string
+    """
+    lines = ["PREVIOUS ISSUES (MUST address in this revision):"]
+
+    if evaluation_feedback:
+        scores = evaluation_feedback.get("scores", {})
+        feedback = evaluation_feedback.get("feedback", {})
+        improvements = evaluation_feedback.get("improvements", [])
+
+        # Extract criteria with low scores
+        weak_criteria = []
+        for criterion, score in scores.items():
+            if isinstance(score, (int, float)) and score < 7:
+                criterion_feedback = feedback.get(criterion, "")
+                weak_criteria.append((criterion, score, criterion_feedback))
+
+        if weak_criteria:
+            lines.append("\nLow-scoring criteria:")
+            for criterion, score, fb in weak_criteria:
+                lines.append(f"  - {criterion.replace('_', ' ').upper()} (score: {score}/10): {fb[:200]}")
+
+        if improvements:
+            lines.append("\nSuggested improvements:")
+            for imp in improvements[:5]:
+                if isinstance(imp, str):
+                    lines.append(f"  - {imp[:200]}")
+                elif isinstance(imp, dict):
+                    lines.append(f"  - {imp.get('suggestion', imp.get('improvement', str(imp)))[:200]}")
+
+    if unsupported_claims:
+        lines.append(f"\nUnsupported claims found ({len(unsupported_claims)}):")
+        for claim_info in unsupported_claims[:8]:
+            claim_text = claim_info.get("claim", "")
+            issue = claim_info.get("issue", "")
+            lines.append(f"  - Claim: \"{claim_text[:150]}\"")
+            if issue:
+                lines.append(f"    Issue: {issue[:150]}")
+
+    lines.append("\nYou MUST address ALL of these issues. Do NOT repeat the same errors.")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def get_fact_checking_prompt(

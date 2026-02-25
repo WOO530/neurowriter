@@ -24,6 +24,7 @@ Your task is to incorporate the user's revision request while:
 3. Preserving the overall structure and flow when possible
 4. Ensuring all citations remain valid and accurate
 5. Updating citation numbers if necessary due to additions/removals
+6. Separating each paragraph with a blank line (double newline)
 
 CITATION RULES:
 - Every factual claim must have a citation
@@ -51,6 +52,7 @@ INSTRUCTIONS:
 3. Renumber citations sequentially if needed
 4. Preserve academic tone and scientific rigor
 5. If the revision cannot be completed with available references, note what information is missing
+6. Separate each paragraph with a blank line
 
 Provide the revised introduction with updated citations."""
 

@@ -86,10 +86,10 @@ def _get_criterion_guidelines(criterion: str, topic_analysis: dict, landscape: d
 - Score 0-4: Mostly generic; could apply to many related topics""",
 
         "reference_density": """For REFERENCE DENSITY (citations portfolio and distribution):
-- Score 9-10: Total 18-35 unique references, ≤15% sentences without citations, 30%+ multiple citations (showcasing field consensus). Single citation points max 5 studies [1-5]
-- Score 7-8: Total 15-20 references, ≤20% sentences without citations, 20%+ multiple citations
-- Score 5-6: Total 10-15 references, ≤30% sentences without citations
-- Score 0-4: Total <10 references OR >40% sentences without citations
+- Score 9-10: Total 15-25 unique references, ≤15% sentences without citations, 30%+ multiple citations (showcasing field consensus). Single citation points max 5 studies [1-5]
+- Score 7-8: Total 12-18 references, ≤20% sentences without citations, 20%+ multiple citations
+- Score 5-6: Total 8-12 references, ≤30% sentences without citations
+- Score 0-4: Total <8 references OR >40% sentences without citations
 Quality check: When citing multiple studies for same claim, verify most impactful/high-tier journals are selected""",
 
         "reference_quality": """For REFERENCE QUALITY (landmark papers, high-impact):
@@ -185,7 +185,10 @@ def _format_landscape_summary(landscape: dict) -> str:
 
 
 def _format_references_summary(reference_pool: list) -> str:
-    """Format reference pool summary
+    """Format reference pool summary with paper titles for accurate evaluation
+
+    Includes each paper's number, first author, title, journal, and year
+    so the evaluator can judge whether cited claims match actual papers.
 
     Args:
         reference_pool: List of reference papers
@@ -200,7 +203,7 @@ def _format_references_summary(reference_pool: list) -> str:
 
     tier_count = {"tier_1": 0, "tier_2": 0, "tier_3": 0, "tier_4": 0}
     for paper in reference_pool:
-        journal = paper.get("journal", "").lower()
+        journal = (paper.get("journal") or "").lower()
         if any(t in journal for t in ["nature", "science", "nejm", "lancet", "jama"]):
             tier_count["tier_1"] += 1
         elif any(t in journal for t in ["psychiatry", "brain", "biological"]):
@@ -214,5 +217,19 @@ def _format_references_summary(reference_pool: list) -> str:
     summary_lines.append(f"  Tier 1 (high-impact): {tier_count['tier_1']}")
     summary_lines.append(f"  Tier 2 (specialty): {tier_count['tier_2']}")
     summary_lines.append(f"  Tier 3-4 (other): {tier_count['tier_3'] + tier_count['tier_4']}")
+
+    # Individual paper listing for accurate factual evaluation
+    summary_lines.append("\nReference list:")
+    for i, paper in enumerate(reference_pool, 1):
+        authors = paper.get("authors", [])
+        first_author = authors[0] if authors else "Unknown"
+        if len(authors) > 1:
+            first_author += " et al."
+        title = paper.get("title", "No title")
+        if len(title) > 80:
+            title = title[:77] + "..."
+        journal = paper.get("journal", "")
+        year = paper.get("pub_year", "")
+        summary_lines.append(f"  [{i}] {first_author}. {title}. {journal} {year}")
 
     return "\n".join(summary_lines)

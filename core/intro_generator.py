@@ -87,7 +87,12 @@ class IntroductionGenerator:
         Returns:
             Dictionary with introduction and metadata
         """
+        from prompts.modality_config import detect_modality
+
         logger.info("Using deep research pipeline (100-200 papers)")
+
+        modality = detect_modality(research_topic)
+        logger.info(f"Detected modality: {modality}")
 
         # Step 1: Conduct deep research
         logger.info("Step 1/4: Conducting deep hierarchical research...")
@@ -117,7 +122,8 @@ class IntroductionGenerator:
         system_prompt, user_prompt = get_introduction_generation_prompt(
             topic_analysis,
             reference_pool,
-            landscape=landscape  # Pass landscape context
+            landscape=landscape,
+            modality=modality
         )
 
         try:
@@ -125,7 +131,8 @@ class IntroductionGenerator:
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.7,
-                max_tokens=3000
+                max_tokens=2000,
+                reasoning_effort="high",
             )
 
             logger.info("Introduction generated successfully")
@@ -224,7 +231,8 @@ class IntroductionGenerator:
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.7,
-                max_tokens=3000
+                max_tokens=2000,
+                reasoning_effort="high",
             )
 
             logger.info("Introduction generated successfully")
@@ -256,17 +264,18 @@ class IntroductionGenerator:
     # Discrete step methods for interactive pipeline
     # ------------------------------------------------------------------
 
-    def step_parse_topic(self, research_topic: str) -> Dict:
+    def step_parse_topic(self, research_topic: str, modality: str = "eeg") -> Dict:
         """Step: Parse research topic with deep hierarchical analysis
 
         Args:
             research_topic: Research topic string
+            modality: Detected modality ("eeg", "psg", or "mixed")
 
         Returns:
             Topic analysis dictionary
         """
         logger.info("Step: Parsing research topic...")
-        return self.deep_researcher.topic_parser.parse_topic_deep(research_topic)
+        return self.deep_researcher.topic_parser.parse_topic_deep(research_topic, modality=modality)
 
     def step_collect_papers(self, topic_analysis: Dict) -> List[Dict]:
         """Step: Collect papers using multi-strategy search
@@ -313,7 +322,11 @@ class IntroductionGenerator:
         self,
         topic_analysis: Dict,
         reference_pool: List[Dict],
-        landscape: Dict
+        landscape: Dict,
+        modality: str = "eeg",
+        writing_strategy: dict = None,
+        evaluation_feedback: dict = None,
+        unsupported_claims: list = None,
     ) -> str:
         """Step: Generate introduction text
 
@@ -321,6 +334,10 @@ class IntroductionGenerator:
             topic_analysis: Topic analysis
             reference_pool: Selected reference papers
             landscape: Landscape analysis
+            modality: Detected modality ("eeg", "psg", or "mixed")
+            writing_strategy: Optional writing strategy with paragraph outline
+            evaluation_feedback: Optional evaluation results from previous iteration
+            unsupported_claims: Optional list of unsupported claims from previous iteration
 
         Returns:
             Generated introduction text
@@ -329,13 +346,18 @@ class IntroductionGenerator:
         system_prompt, user_prompt = get_introduction_generation_prompt(
             topic_analysis,
             reference_pool,
-            landscape=landscape
+            landscape=landscape,
+            modality=modality,
+            writing_strategy=writing_strategy,
+            evaluation_feedback=evaluation_feedback,
+            unsupported_claims=unsupported_claims,
         )
         return self.llm_client.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.7,
-            max_tokens=3000
+            max_tokens=2000,
+            reasoning_effort="high",
         )
 
     def _format_references(self, articles: List[Dict]) -> List[str]:
@@ -386,10 +408,16 @@ class IntroductionGenerator:
 
     def _generate_with_streaming_deep_research(self, research_topic: str):
         """Generate with streaming using deep research pipeline"""
+        from prompts.modality_config import detect_modality
+
+        # Step 0: Detect modality
+        modality = detect_modality(research_topic)
+
         # Step 1: Parse topic deeply
         yield ("parsing", "Conducting deep hierarchical topic analysis...")
-        topic_analysis = self.deep_researcher.topic_parser.parse_topic_deep(research_topic)
-        yield ("parsing", f"Topic parsed: {topic_analysis.get('disease', 'Unknown')} + {topic_analysis.get('key_intervention_or_focus', 'Unknown')}")
+        topic_analysis = self.deep_researcher.topic_parser.parse_topic_deep(research_topic, modality=modality)
+        topic_analysis["_detected_modality"] = modality
+        yield ("parsing", f"Topic parsed: {topic_analysis.get('disease', 'Unknown')} + {topic_analysis.get('key_intervention_or_focus', 'Unknown')} (modality: {modality})")
 
         # Step 1.5: Review search queries
         yield ("confirmation", "Reviewing generated search strategies...")
@@ -418,14 +446,16 @@ class IntroductionGenerator:
         system_prompt, user_prompt = get_introduction_generation_prompt(
             topic_analysis,
             reference_pool,
-            landscape=landscape
+            landscape=landscape,
+            modality=modality
         )
 
         introduction = self.llm_client.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.7,
-            max_tokens=3000
+            max_tokens=2000,
+            reasoning_effort="high",
         )
 
         references = self._format_references(reference_pool)
@@ -489,7 +519,8 @@ class IntroductionGenerator:
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.7,
-            max_tokens=3000
+            max_tokens=2000,
+            reasoning_effort="high",
         )
 
         references = self._format_references(top_articles)

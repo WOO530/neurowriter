@@ -48,7 +48,10 @@ class CitationScorer:
         "JAMA Psychiatry", "JAMA Neurology",
         "Lancet Neurology", "The Lancet Neurology", "Lancet Psychiatry", "The Lancet Psychiatry",
         "Brain", "Biological Psychiatry", "Molecular Psychiatry",
-        "American Journal of Psychiatry"
+        "American Journal of Psychiatry",
+        "Annals of Neurology", "Sleep Medicine Reviews",
+        "Movement Disorders", "Epilepsia",
+        "Acta Neuropathologica", "Neurology Clinical Practice"
     }
 
     TIER_3_JOURNALS = {
@@ -56,7 +59,11 @@ class CitationScorer:
         "Psychiatry Research", "Journal of Affective Disorders",
         "Journal of Neuroscience", "Neurology", "Sleep",
         "American Journal of Medical Genetics", "Neurobiology of Disease",
-        "Neural Engineering & Translation", "Computational Psychiatry"
+        "Neural Engineering & Translation", "Computational Psychiatry",
+        "Sleep Medicine", "Journal of Clinical Sleep Medicine",
+        "Sleep and Breathing", "Journal of Sleep Research", "Sleep Health",
+        "Cerebral Cortex", "Frontiers in Neurology", "Journal of Neurology",
+        "European Journal of Neurology", "Journal of Neuropsychiatry"
     }
 
     # Standard review/meta-analysis indicators
@@ -70,9 +77,20 @@ class CitationScorer:
         re.compile(r'\bn\s*=\s*\d+', re.IGNORECASE),  # sample sizes
     ]
 
+    # Pattern-based fallback tiers (checked when static tier matching fails)
+    _TIER_PATTERNS = {
+        30: ["nature ", "lancet ", "jama ", "annals of ", "bmj"],
+        20: ["journal of neurology", "journal of psychiatry", "journal of sleep",
+             "brain ", "neurobiol", "neuropsych", "cerebr", "cortex",
+             "sleep ", "epilep", "movement dis"],
+        15: ["frontiers in", "plos", "scientific reports", "bmc ",
+             "international journal"],
+    }
+
     def __init__(self):
         """Initialize citation scorer"""
         self.current_year = datetime.now().year
+        self.dynamic_tiers: Dict[str, float] = {}
 
     def score_article(
         self,
@@ -104,8 +122,19 @@ class CitationScorer:
 
         return min(score, 100)
 
+    def register_journal_tier(self, journal_name: str, score: float):
+        """Register a dynamically discovered journal tier
+
+        Args:
+            journal_name: Journal name (stored lowercase)
+            score: Score to assign (max 40)
+        """
+        self.dynamic_tiers[journal_name.lower()] = min(score, 40)
+
     def _score_journal(self, journal_name: str) -> float:
         """Score article based on journal impact tier
+
+        Lookup order: dynamic tiers -> static tiers -> pattern fallback -> default.
 
         Args:
             journal_name: Name of the journal
@@ -117,6 +146,11 @@ class CitationScorer:
             return 18  # Default to tier 3
 
         journal_lower = journal_name.lower()
+
+        # Check dynamic tiers first (from landscape analysis)
+        for dyn_name, dyn_score in self.dynamic_tiers.items():
+            if dyn_name in journal_lower:
+                return dyn_score
 
         # Check tier 1 (highest impact)
         for tier1_journal in self.TIER_1_JOURNALS:
@@ -132,6 +166,11 @@ class CitationScorer:
         for tier3_journal in self.TIER_3_JOURNALS:
             if tier3_journal.lower() in journal_lower:
                 return 20
+
+        # Pattern-based fallback
+        for score, patterns in self._TIER_PATTERNS.items():
+            if any(pat in journal_lower for pat in patterns):
+                return score
 
         # Tier 4 (general/other PubMed journals)
         return 10
@@ -214,10 +253,10 @@ class CitationScorer:
         Returns:
             "review", "meta-analysis", "original", or "unknown"
         """
-        title = article.get("title", "").lower()
-        abstract = article.get("abstract", "").lower()
+        title = (article.get("title") or "").lower()
+        abstract = (article.get("abstract") or "").lower()
 
-        text = f"{title} {abstract}".lower()
+        text = f"{title} {abstract}"
 
         if any(keyword in text for keyword in ["meta-analysis", "meta-analytic", "meta analysis"]):
             return "meta-analysis"
@@ -242,6 +281,9 @@ class CitationScorer:
         Returns:
             List of lowercase keywords/bigrams
         """
+        if not topic:
+            return []
+
         # Normalise and tokenise
         text = re.sub(r'[^a-zA-Z0-9\s-]', ' ', topic.lower())
         tokens = [t for t in text.split() if t not in _STOPWORDS and len(t) > 2]
@@ -279,8 +321,8 @@ class CitationScorer:
         if not topic_keywords:
             return 0.5  # neutral default
 
-        title = article.get("title", "").lower()
-        abstract = article.get("abstract", "").lower()
+        title = (article.get("title") or "").lower()
+        abstract = (article.get("abstract") or "").lower()
 
         title_hits = sum(1 for kw in topic_keywords if kw in title)
         abstract_hits = sum(1 for kw in topic_keywords if kw in abstract)

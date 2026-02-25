@@ -1,10 +1,15 @@
 """Prompt templates for writing strategy generation"""
 
+from prompts.genre_config import GENRE_PROFILES
+from prompts.modality_config import SECTION_NAMES
+
 
 def get_writing_strategy_prompt(
     topic_analysis: dict,
     reference_pool: list,
-    landscape: dict
+    landscape: dict,
+    modality: str = "eeg",
+    genre: str = "research_introduction",
 ) -> tuple[str, str]:
     """Get prompts for generating a writing strategy / outline
 
@@ -12,11 +17,26 @@ def get_writing_strategy_prompt(
         topic_analysis: Parsed topic analysis
         reference_pool: Selected reference papers
         landscape: Literature landscape analysis
+        modality: Detected modality ("eeg", "psg", or "mixed")
+        genre: Document genre key from GENRE_PROFILES
 
     Returns:
         Tuple of (system_prompt, user_prompt)
     """
-    system_prompt = """You are an expert medical research writer planning the structure of a research paper introduction.
+    profile = GENRE_PROFILES.get(genre, GENRE_PROFILES["research_introduction"])
+    section = SECTION_NAMES.get(modality, SECTION_NAMES["eeg"])
+
+    # Build system prompt from genre profile
+    role_text = profile["role"].format(
+        domain_label=section["domain_label"],
+        journal_examples=section["journal_examples"],
+    )
+
+    system_prompt = f"""{role_text}
+
+{profile["structure_guide"]}
+
+{profile["proportion_guide"]}
 
 Your task is to create a detailed paragraph-by-paragraph outline with:
 - A clear narrative arc from broad context to specific study rationale
@@ -36,10 +56,10 @@ Respond ONLY with valid JSON, no additional text or markdown formatting."""
     trends_text = "\n".join(f"  - {t}" for t in trends[:4]) if trends else "  (none identified)"
 
     # Focus drift prevention: extract concept hierarchy and primary focus
-    disease = topic_analysis.get('disease', '')
-    concept_hierarchy = topic_analysis.get('concept_hierarchy', [])
-    disease_subtypes = topic_analysis.get('disease_subtypes', [])
-    primary_focus = concept_hierarchy[-1] if concept_hierarchy else topic_analysis.get('key_intervention_or_focus', disease)
+    disease = topic_analysis.get('disease', '') or ""
+    concept_hierarchy = topic_analysis.get('concept_hierarchy', []) or []
+    disease_subtypes = topic_analysis.get('disease_subtypes', []) or []
+    primary_focus = concept_hierarchy[-1] if concept_hierarchy else (topic_analysis.get('key_intervention_or_focus', '') or disease or "")
 
     concept_chain = ""
     if concept_hierarchy:
@@ -96,17 +116,18 @@ Return JSON:
         ...
     ],
     "narrative_arc": "Brief description of the overall narrative flow from broad to specific",
-    "estimated_word_count": 1100,
+    "estimated_word_count": 700,
     "total_references_planned": 25
 }}
 
 REQUIREMENTS:
-- Plan 4-6 paragraphs
+- Plan 3-5 paragraphs (target 600-800 words — concise, every sentence must carry weight)
 - Each paragraph must reference at least 3 papers by their [N] number
 - The final paragraph must end with study aims
 - Total planned references should be 15-35 unique papers
 - Narrative must narrow from broad to specific within first 1-2 paragraphs, then STAY specific
-- Narrative arc should flow: disease burden -> limitations -> biomarkers -> methodology -> integration -> study aims"""
+- Narrative arc should flow: disease burden -> limitations -> biomarkers -> methodology -> integration -> study aims
+- Content proportions must follow the CONTENT PROPORTION CONSTRAINTS above"""
 
     return system_prompt, user_prompt
 

@@ -7,7 +7,7 @@ load_dotenv()
 
 # API Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
 
 # PubMed Configuration
 PUBMED_BATCH_SIZE = 20
@@ -20,8 +20,8 @@ DB_PATH = os.getenv("DB_PATH", "neurowriter_cache.db")
 # Application Configuration
 APP_TITLE = "NeuroWriter"
 APP_DESCRIPTION = "EEG/Deep Learning 의학논문 Introduction Generator"
-MAX_INTRO_LENGTH = 1200  # words
-MIN_INTRO_LENGTH = 800  # words
+MAX_INTRO_LENGTH = 800  # words
+MIN_INTRO_LENGTH = 500  # words
 REFERENCE_VANCOUVER_FORMAT = True
 
 # Logging

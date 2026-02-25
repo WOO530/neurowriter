@@ -19,7 +19,7 @@ class TopicParser:
         """
         self.llm_client = llm_client or get_llm_client()
 
-    def parse_topic_deep(self, research_topic: str) -> Dict:
+    def parse_topic_deep(self, research_topic: str, modality: str = "eeg") -> Dict:
         """Parse research topic with deep hierarchical analysis
 
         Returns comprehensive structured analysis including:
@@ -30,20 +30,22 @@ class TopicParser:
 
         Args:
             research_topic: The research topic from user
+            modality: Detected modality ("eeg", "psg", or "mixed")
 
         Returns:
             Dictionary with deep topic analysis
         """
         logger.info(f"Parsing topic deeply: {research_topic[:60]}...")
 
-        system_prompt, user_prompt = get_topic_parsing_prompt(research_topic)
+        system_prompt, user_prompt = get_topic_parsing_prompt(research_topic, modality=modality)
 
         try:
             response = self.llm_client.generate(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
-                temperature=0.4,  # Lower temp for structured analysis
-                max_tokens=3000
+                temperature=0.4,
+                max_tokens=3000,
+                reasoning_effort="medium",
             )
 
             # Guard against empty / None response
@@ -59,6 +61,22 @@ class TopicParser:
 
             # Parse JSON response
             parsed_data = json.loads(clean_response)
+
+            # Sanitize None → defaults (LLM may return "disease": null)
+            _str_fields = [
+                "disease", "data_type", "methodology", "outcome",
+                "key_intervention_or_focus", "additional_context",
+            ]
+            _list_fields = [
+                "disease_subtypes", "concept_hierarchy", "key_concepts",
+                "knowledge_areas_to_research", "search_queries",
+            ]
+            for f in _str_fields:
+                if f in parsed_data and parsed_data[f] is None:
+                    parsed_data[f] = ""
+            for f in _list_fields:
+                if f in parsed_data and parsed_data[f] is None:
+                    parsed_data[f] = []
 
             # Validate structure
             required_fields = [
@@ -102,7 +120,8 @@ class TopicParser:
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 temperature=0.5,
-                max_tokens=2500
+                max_tokens=2500,
+                reasoning_effort="high",
             )
 
             # Handle empty response

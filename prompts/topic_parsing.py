@@ -1,11 +1,14 @@
 """Prompt templates for topic parsing"""
 
+from prompts.modality_config import QUERY_EXAMPLES
 
-def get_topic_parsing_prompt(research_topic: str) -> tuple[str, str]:
+
+def get_topic_parsing_prompt(research_topic: str, modality: str = "eeg") -> tuple[str, str]:
     """Get system and user prompts for comprehensive topic parsing
 
     Args:
         research_topic: The research topic from user
+        modality: Detected modality ("eeg", "psg", or "mixed")
 
     Returns:
         Tuple of (system_prompt, user_prompt)
@@ -15,7 +18,21 @@ Your task is to analyze a research topic in DEPTH and create a strategic researc
 
 You must respond ONLY with valid JSON, with no additional text or markdown formatting.
 
-Provide maximum depth and specificity. This analysis will guide a comprehensive literature search and introduction writing strategy."""
+Provide maximum depth and specificity. This analysis will guide a comprehensive literature search and introduction writing strategy.
+
+SEARCH QUERY STRATEGY:
+- Output raw PubMed queries only — no labels, prefixes, or descriptions
+- Use Boolean operators explicitly: (term1 OR term2) AND (term3 OR term4)
+- Include OR for synonyms and abbreviations in EVERY query (e.g., "(REM sleep behavior disorder OR RBD OR iRBD)")
+- Keep queries 4-8 terms long (excluding Boolean operators). Avoid keyword chains >8 terms — they return zero results on PubMed
+- Vary breadth: 3-4 broad queries (2-4 terms), 8-9 moderate queries (4-6 terms), 2-3 narrow queries (6-8 terms)
+- Include at least 2 review/meta-analysis queries with explicit Boolean structure
+- Combine terms from different angles: epidemiology, mechanism, biomarker, methodology, clinical outcome
+- Avoid repeating the same structure — each query should target a distinct literature segment"""
+
+    # Use EEG examples as default for mixed modality
+    query_key = modality if modality in QUERY_EXAMPLES else "eeg"
+    query_examples = QUERY_EXAMPLES[query_key]
 
     user_prompt = f"""Conduct a DEEP hierarchical analysis of this research topic:
 
@@ -29,7 +46,7 @@ Return a JSON object with EXACTLY this structure (all fields required):
     "key_intervention_or_focus": "Primary intervention/focus (e.g., 'Clozapine' or 'Deep Learning')",
 
     "data_type": "Type of data used (e.g., 'EEG', 'fMRI')",
-    "methodology": "Analysis methodology (e.g., 'Deep Learning', 'CNN', 'LSTM')",
+    "methodology": "Analysis methodology category — broad level only (e.g., 'Deep Learning', 'Machine Learning', 'Statistical Analysis'). Do NOT specify a particular architecture (not CNN, LSTM, Transformer, etc.)",
     "outcome": "Primary outcome/prediction target",
 
     "concept_hierarchy": [
@@ -52,23 +69,7 @@ Return a JSON object with EXACTLY this structure (all fields required):
         "... comprehensive coverage of what introduction should discuss ..."
     ],
 
-    "search_queries": [
-        "Query 1: Very general (e.g., 'schizophrenia treatment')",
-        "Query 2: Disease + condition (e.g., 'treatment resistant schizophrenia')",
-        "Query 3: Specific intervention (e.g., 'clozapine response prediction')",
-        "Query 4: Data type (e.g., 'EEG biomarkers schizophrenia')",
-        "Query 5: Methodology (e.g., 'deep learning EEG psychiatric disorders')",
-        "Query 6: Combination specific (e.g., 'clozapine EEG deep learning')",
-        "Query 7: Outcomes (e.g., 'clozapine non-response predictors')",
-        "Query 8: Related biomarkers (e.g., 'neurophysiological markers antipsychotic response')",
-        "Query 9: Clinical context (e.g., 'clozapine pharmacogenomics prediction')",
-        "Query 10: Review/meta-analysis (e.g., 'treatment resistant schizophrenia systematic review')",
-        "Query 11: Mechanism (e.g., 'clozapine mechanism action neurotransmitter')",
-        "Query 12: Alternative approaches (e.g., 'machine learning antipsychotic treatment selection')",
-        "Query 13: Recent trends (e.g., 'neural networks EEG classification psychotic disorders')",
-        "Query 14: Clinical challenges (e.g., 'clozapine side effects monitoring EEG')",
-        "Query 15: Emerging evidence (e.g., 'multimodal biomarker schizophrenia prediction')"
-    ],
+{query_examples},
 
     "expected_discovery_areas": {{
         "landmark_findings": "What are the seminal/foundational studies you hope to find?",

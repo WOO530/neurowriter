@@ -1,6 +1,7 @@
 """Pipeline orchestrator for interactive self-evolving introduction generation"""
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 from core.llm_client import LLMClient, get_llm_client
@@ -10,13 +11,16 @@ from core.self_evaluator import SelfEvaluator
 from core.deep_researcher import DeepResearcher
 from prompts.strategy_brief import get_writing_strategy_prompt
 from prompts.claim_extraction import get_claim_extraction_prompt, get_supplementary_query_prompt, get_feedback_to_queries_prompt
+from prompts.modality_config import detect_modality
 
 logger = logging.getLogger(__name__)
 
 # Maximum self-evolution iterations
-MAX_EVOLUTION_ITERATIONS = 2
+MAX_EVOLUTION_ITERATIONS = 4
 # Factual accuracy threshold for triggering self-evolution
 FACTUAL_ACCURACY_THRESHOLD = 7
+# Overall score threshold for triggering self-evolution
+OVERALL_SCORE_THRESHOLD = 7.8
 
 
 class PipelineOrchestrator:
@@ -48,10 +52,17 @@ class PipelineOrchestrator:
     def parse_topic(self, research_topic: str) -> Dict:
         """Parse research topic into structured analysis
 
+        Detects modality (eeg/psg/mixed) and stores it in the result
+        so downstream stages can use modality-specific prompts.
+
         Returns:
             Topic analysis dict with search_queries, disease, etc.
         """
-        return self.intro_generator.step_parse_topic(research_topic)
+        modality = detect_modality(research_topic)
+        logger.info(f"Detected modality: {modality}")
+        topic_analysis = self.intro_generator.step_parse_topic(research_topic, modality=modality)
+        topic_analysis["_detected_modality"] = modality
+        return topic_analysis
 
     def update_queries(self, topic_analysis: Dict, edited_queries: List[str]) -> Dict:
         """Replace search queries in topic analysis with user-edited ones
@@ -92,14 +103,17 @@ class PipelineOrchestrator:
         Returns:
             Strategy dict with paragraphs, narrative_arc, etc.
         """
+        modality = topic_analysis.get("_detected_modality", "eeg")
         system_prompt, user_prompt = get_writing_strategy_prompt(
-            topic_analysis, reference_pool, landscape
+            topic_analysis, reference_pool, landscape,
+            modality=modality,
         )
         response = self.llm_client.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.5,
-            max_tokens=2000
+            max_tokens=2000,
+            reasoning_effort="high",
         )
         try:
             clean = _strip_code_fences(response)
@@ -160,7 +174,8 @@ class PipelineOrchestrator:
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.4,
-            max_tokens=1500
+            max_tokens=1500,
+            reasoning_effort="medium",
         )
         try:
             clean = _strip_code_fences(response)
@@ -199,12 +214,23 @@ class PipelineOrchestrator:
     # ------------------------------------------------------------------
 
     def generate_introduction(
-        self, topic_analysis: Dict, reference_pool: List[Dict], landscape: Dict
+        self,
+        topic_analysis: Dict,
+        reference_pool: List[Dict],
+        landscape: Dict,
+        writing_strategy: dict = None,
+        evaluation_feedback: dict = None,
+        unsupported_claims: list = None,
     ) -> str:
         """Generate introduction text"""
-        return self.intro_generator.step_generate_introduction(
-            topic_analysis, reference_pool, landscape
+        modality = topic_analysis.get("_detected_modality", "eeg")
+        text = self.intro_generator.step_generate_introduction(
+            topic_analysis, reference_pool, landscape, modality=modality,
+            writing_strategy=writing_strategy,
+            evaluation_feedback=evaluation_feedback,
+            unsupported_claims=unsupported_claims,
         )
+        return _normalize_paragraph_breaks(text)
 
     def evaluate_introduction(
         self,
@@ -224,9 +250,10 @@ class PipelineOrchestrator:
 
     @staticmethod
     def needs_self_evolution(evaluation: Dict) -> bool:
-        """Check if factual_accuracy score is below threshold"""
-        score = evaluation.get("scores", {}).get("factual_accuracy", 10)
-        return score < FACTUAL_ACCURACY_THRESHOLD
+        """Check if factual_accuracy or overall score is below threshold"""
+        fa_score = evaluation.get("scores", {}).get("factual_accuracy", 10)
+        overall = evaluation.get("overall_score", 10)
+        return fa_score < FACTUAL_ACCURACY_THRESHOLD or overall < OVERALL_SCORE_THRESHOLD
 
     def extract_unsupported_claims(self, evaluation: Dict, introduction: str) -> List[Dict]:
         """Extract unsupported claims from evaluation feedback
@@ -239,7 +266,8 @@ class PipelineOrchestrator:
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.4,
-            max_tokens=1500
+            max_tokens=1500,
+            reasoning_effort="medium",
         )
         try:
             clean = _strip_code_fences(response)
@@ -262,7 +290,8 @@ class PipelineOrchestrator:
             prompt=user_prompt,
             system_prompt=system_prompt,
             temperature=0.4,
-            max_tokens=1000
+            max_tokens=1000,
+            reasoning_effort="medium",
         )
         try:
             clean = _strip_code_fences(response)
@@ -282,16 +311,122 @@ class PipelineOrchestrator:
         self,
         current_pool: List[Dict],
         new_papers: List[Dict],
-        landscape: Dict
+        landscape: Dict,
+        current_introduction: str = "",
     ) -> List[Dict]:
-        """Expand reference pool with new papers and re-select
+        """Expand reference pool with new papers, preserving cited papers
+
+        If current_introduction is provided, papers already cited ([N]) are
+        kept at their original positions so citation numbers stay valid.
 
         Returns:
             New reference pool after incorporating new papers
         """
+        # Identify papers currently cited in the introduction
+        cited_indices: set = set()
+        if current_introduction:
+            for m in re.finditer(r'\[(\d+)\]', current_introduction):
+                cited_indices.add(int(m.group(1)))
+
+        # Separate cited papers (preserve) vs non-cited
+        cited_papers: List[Dict] = []
+        cited_pmids: set = set()
+        for idx in sorted(cited_indices):
+            if 1 <= idx <= len(current_pool):
+                paper = current_pool[idx - 1]
+                cited_papers.append(paper)
+                pmid = paper.get("pmid")
+                if pmid:
+                    cited_pmids.add(pmid)
+
+        # Select from new papers (excluding already cited)
         combined = current_pool + new_papers
-        # Use the paper pool (combined) to re-select
-        return self.deep_researcher.select_reference_pool(combined, landscape)
+        reselected = self.deep_researcher.select_reference_pool(combined, landscape)
+
+        # Build final pool: cited first (original order), then new selections
+        additional = [
+            p for p in reselected
+            if p.get("pmid") not in cited_pmids
+        ]
+
+        max_pool = 55
+        final_pool = cited_papers + additional
+        return final_pool[:max_pool]
+
+    @staticmethod
+    def validate_citation_range(introduction: str, reference_pool_size: int) -> str:
+        """Remove citation numbers that fall outside [1, reference_pool_size]
+
+        Also cleans up empty brackets resulting from removal.
+
+        Args:
+            introduction: Introduction text with [N] citations
+            reference_pool_size: Number of papers in the reference pool
+
+        Returns:
+            Cleaned introduction text
+        """
+        if not introduction or reference_pool_size <= 0:
+            return introduction
+
+        def _replace_bracket(match):
+            inner = match.group(1)
+            # Handle ranges like "3-5" and lists like "3,4,5"
+            parts = re.split(r'[,;]\s*', inner)
+            valid_parts = []
+            for part in parts:
+                part = part.strip()
+                range_m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', part)
+                if range_m:
+                    lo, hi = int(range_m.group(1)), int(range_m.group(2))
+                    if 1 <= lo <= reference_pool_size and 1 <= hi <= reference_pool_size:
+                        valid_parts.append(part)
+                elif part.isdigit():
+                    n = int(part)
+                    if 1 <= n <= reference_pool_size:
+                        valid_parts.append(part)
+            if not valid_parts:
+                return ""
+            return "[" + ",".join(valid_parts) + "]"
+
+        cleaned = re.sub(r'\[([^\]]+)\]', _replace_bracket, introduction)
+        # Remove leftover empty space from removed citations
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+        return cleaned
+
+
+def _normalize_paragraph_breaks(text: str) -> str:
+    """Normalize paragraph breaks for consistent markdown rendering.
+
+    Handles three cases:
+    1. Already has double newlines → clean up intra-paragraph single newlines
+    2. Only single newlines → convert to double newlines between paragraphs
+    3. No newlines (wall of text) → return as-is to avoid incorrect splitting
+    """
+    if not text:
+        return text
+    # Normalize line endings
+    text = text.replace('\r\n', '\n')
+
+    # Case 1: Has double newlines — split into paragraphs, clean up
+    # single newlines within each paragraph (join wrapped lines)
+    if '\n\n' in text:
+        paragraphs = text.split('\n\n')
+        cleaned = []
+        for p in paragraphs:
+            stripped = p.strip()
+            if stripped:
+                # Replace single newlines within paragraph with spaces
+                cleaned.append(re.sub(r'\n', ' ', stripped))
+        return '\n\n'.join(cleaned)
+
+    # Case 2: Only single newlines — each non-empty line is a paragraph
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if len(lines) >= 3:
+        return '\n\n'.join(lines)
+
+    # Case 3: No meaningful line breaks — return as-is
+    return text
 
 
 def _strip_code_fences(text: str) -> str:

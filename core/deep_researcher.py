@@ -25,6 +25,10 @@ _CATEGORY_PATTERNS: Dict[str, List[str]] = {
         "biomarker", "neural correlate", "eeg", "erp", "spectral",
         "oscillat", "connectivity", "neurophysiolog", "electrophysiolog",
         "polysomnograph", "psg", "sleep stage",
+        "apnea", "hypopnea", "rem behavior", "narcolepsy", "circadian",
+        "sleep architecture", "sleep spindle", "k-complex", "arousal index",
+        "periodic limb movement", "sleep efficiency", "sleep latency",
+        "oxygen desaturation", "ahi",
     ],
     "methodology_ml": [
         "deep learning", "machine learning", "neural network", "cnn",
@@ -213,9 +217,8 @@ class DeepResearcher:
 
         for paper in papers:
             text = (
-                (paper.get("title", "") + " " + paper.get("abstract", ""))
-                .lower()
-            )
+                (paper.get("title") or "") + " " + (paper.get("abstract") or "")
+            ).lower()
             matched = False
             for cat, keywords in _CATEGORY_PATTERNS.items():
                 if any(kw in text for kw in keywords):
