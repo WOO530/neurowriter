@@ -116,15 +116,15 @@ Return JSON:
         ...
     ],
     "narrative_arc": "Brief description of the overall narrative flow from broad to specific",
-    "estimated_word_count": 700,
+    "estimated_word_count": 550,
     "total_references_planned": 25
 }}
 
 REQUIREMENTS:
-- Plan 3-5 paragraphs (target 600-800 words — concise, every sentence must carry weight)
+- Plan 3-5 paragraphs (target 450-650 words — concise, every sentence must carry weight)
 - Each paragraph must reference at least 3 papers by their [N] number
 - The final paragraph must end with study aims
-- Total planned references should be 15-35 unique papers
+- Total planned references should be 10-25 unique papers
 - Narrative must narrow from broad to specific within first 1-2 paragraphs, then STAY specific
 - Narrative arc should flow: disease burden -> limitations -> biomarkers -> methodology -> integration -> study aims
 - Content proportions must follow the CONTENT PROPORTION CONSTRAINTS above"""

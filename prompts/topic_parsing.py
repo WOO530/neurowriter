@@ -25,7 +25,7 @@ SEARCH QUERY STRATEGY:
 - Use Boolean operators explicitly: (term1 OR term2) AND (term3 OR term4)
 - Include OR for synonyms and abbreviations in EVERY query (e.g., "(REM sleep behavior disorder OR RBD OR iRBD)")
 - Keep queries 4-8 terms long (excluding Boolean operators). Avoid keyword chains >8 terms — they return zero results on PubMed
-- Vary breadth: 3-4 broad queries (2-4 terms), 8-9 moderate queries (4-6 terms), 2-3 narrow queries (6-8 terms)
+- Vary breadth: 2-4 broad queries (2-4 terms), 5-10 moderate queries (4-6 terms), 2-4 narrow queries (6-8 terms)
 - Include at least 2 review/meta-analysis queries with explicit Boolean structure
 - Combine terms from different angles: epidemiology, mechanism, biomarker, methodology, clinical outcome
 - Avoid repeating the same structure — each query should target a distinct literature segment"""
@@ -81,7 +81,7 @@ Return a JSON object with EXACTLY this structure (all fields required):
 
 REQUIREMENTS:
 - concept_hierarchy: Must have AT LEAST 5 levels, from very broad to ultra-specific
-- search_queries: Must have 15 DISTINCT queries covering all angles
+- search_queries: Generate 10-20 DISTINCT queries. Default to ~15 for most topics; use fewer (10-12) for well-studied topics, more (15-20) for niche or cross-disciplinary topics
 - key_concepts: At least 12 concepts that a comprehensive introduction should address
 - knowledge_areas_to_research: At least 8 major areas to cover"""
 

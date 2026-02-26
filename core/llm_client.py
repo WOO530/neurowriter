@@ -2,7 +2,7 @@
 from typing import Optional, Iterator
 import logging
 from abc import ABC, abstractmethod
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 import config
 
 logger = logging.getLogger(__name__)
@@ -64,13 +64,22 @@ class OpenAIClient(LLMClient):
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    # Reasoning effort → (token multiplier, min tokens)
-    _EFFORT_TIERS = {
-        "none":   (1, 2048),     # no reasoning — output only
-        "low":    (2, 4096),
-        "medium": (3, 8192),
-        "high":   (5, 16384),
-        "xhigh":  (8, 32768),   # GPT-5.2 max-quality tier
+    # Reasoning effort → reasoning token budget (added ON TOP of output tokens)
+    # max_completion_tokens = max_tokens (output) + reasoning budget
+    _REASONING_BUDGETS = {
+        "none":   0,        # no reasoning — output only
+        "low":    8192,
+        "medium": 16384,
+        "high":   32768,
+        "xhigh":  65536,    # GPT-5.2 max-quality tier
+    }
+
+    # Effort downgrade map for retry on reasoning token overflow
+    _EFFORT_DOWNGRADE = {
+        "xhigh": "high",
+        "high":  "medium",
+        "medium": "low",
+        "low":   "none",
     }
 
     def generate(
@@ -107,11 +116,15 @@ class OpenAIClient(LLMClient):
             }
 
             if self._is_reasoning_model():
-                multiplier, min_tokens = self._EFFORT_TIERS.get(
-                    reasoning_effort, self._EFFORT_TIERS["medium"]
+                reasoning_budget = self._REASONING_BUDGETS.get(
+                    reasoning_effort, self._REASONING_BUDGETS["medium"]
                 )
                 if max_tokens is not None:
-                    params["max_completion_tokens"] = max(max_tokens * multiplier, min_tokens)
+                    # max_completion_tokens = output + reasoning budget
+                    params["max_completion_tokens"] = max_tokens + reasoning_budget
+                elif reasoning_budget > 0:
+                    # No explicit max_tokens: set a reasonable total budget
+                    params["max_completion_tokens"] = 4096 + reasoning_budget
 
                 # Pass reasoning_effort to the API (required for GPT-5.2
                 # whose default is "none"; harmless for GPT-5 default "medium")
@@ -130,7 +143,9 @@ class OpenAIClient(LLMClient):
 
             logger.debug(
                 f"API call: model={self.model}, reasoning={self._is_reasoning_model()}, "
-                f"effort={reasoning_effort}, msgs={len(messages)}"
+                f"effort={reasoning_effort}, "
+                f"max_completion_tokens={params.get('max_completion_tokens', params.get('max_tokens', 'default'))}, "
+                f"msgs={len(messages)}"
             )
 
             response = self.client.chat.completions.create(**params)
@@ -144,8 +159,22 @@ class OpenAIClient(LLMClient):
             if refusal:
                 raise ValueError(f"Model refused request: {refusal}")
 
-            # If content is empty, raise with diagnostic info instead of silent ""
+            # Empty response — likely reasoning consumed all tokens
             if not content:
+                if finish_reason == "length" and self._is_reasoning_model():
+                    lower_effort = self._EFFORT_DOWNGRADE.get(reasoning_effort)
+                    if lower_effort is not None:
+                        logger.warning(
+                            f"Reasoning overflow: effort={reasoning_effort} used all "
+                            f"{response.usage.completion_tokens} tokens. "
+                            f"Retrying with effort={lower_effort}"
+                        )
+                        return self.generate(
+                            prompt=prompt, system_prompt=system_prompt,
+                            temperature=temperature, max_tokens=max_tokens,
+                            reasoning_effort=lower_effort, **kwargs
+                        )
+                # No retry possible or different failure — raise
                 diag = (
                     f"Empty response from {self.model} | "
                     f"finish_reason={finish_reason} | "
@@ -193,11 +222,13 @@ class OpenAIClient(LLMClient):
             }
 
             if self._is_reasoning_model():
-                multiplier, min_tokens = self._EFFORT_TIERS.get(
-                    reasoning_effort, self._EFFORT_TIERS["medium"]
+                reasoning_budget = self._REASONING_BUDGETS.get(
+                    reasoning_effort, self._REASONING_BUDGETS["medium"]
                 )
                 if max_tokens is not None:
-                    params["max_completion_tokens"] = max(max_tokens * multiplier, min_tokens)
+                    params["max_completion_tokens"] = max_tokens + reasoning_budget
+                elif reasoning_budget > 0:
+                    params["max_completion_tokens"] = 4096 + reasoning_budget
 
                 params["reasoning_effort"] = reasoning_effort
 
@@ -220,24 +251,87 @@ class OpenAIClient(LLMClient):
             raise
 
 
+class AzureOpenAIClient(OpenAIClient):
+    """Azure OpenAI client — inherits all generate/streaming/reasoning logic
+    from OpenAIClient, using AzureOpenAI SDK client."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,        # Azure deployment name
+        azure_endpoint: Optional[str] = None,
+        api_version: Optional[str] = None,
+        base_model: Optional[str] = None,   # 실제 모델명 (reasoning 감지용)
+    ):
+        # Do NOT call super().__init__() — it creates an OpenAI() client
+        self.api_key = api_key or config.AZURE_OPENAI_API_KEY
+        self.model = model or config.AZURE_OPENAI_DEPLOYMENT
+
+        azure_endpoint = azure_endpoint or config.AZURE_OPENAI_ENDPOINT
+        api_version = api_version or config.AZURE_OPENAI_API_VERSION
+
+        if not self.api_key:
+            raise ValueError("Azure OpenAI API key not set.")
+        if not azure_endpoint:
+            raise ValueError("Azure OpenAI endpoint not set.")
+        if not self.model:
+            raise ValueError("Azure OpenAI deployment name not set.")
+
+        self._base_model = base_model or ""
+
+        self.client = AzureOpenAI(
+            api_key=self.api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version,
+        )
+        logger.info(
+            f"Azure OpenAI client initialized: deployment={self.model}, "
+            f"base_model={self._base_model or '(not set)'}, endpoint={azure_endpoint}"
+        )
+
+    def _is_reasoning_model(self) -> bool:
+        """Check if current model is a reasoning model.
+
+        Uses base_model (actual model name) if set, otherwise falls back
+        to deployment name. This handles cases where Azure deployment names
+        are arbitrary (e.g. 'my-company-gpt51-deployment').
+        """
+        check_name = self._base_model or self.model
+        return check_name.startswith(self._REASONING_PREFIXES)
+
+
 # Factory function to get LLM client
 def get_llm_client(
     provider: str = "openai",
     api_key: Optional[str] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    azure_endpoint: Optional[str] = None,
+    api_version: Optional[str] = None,
+    base_model: Optional[str] = None,
 ) -> LLMClient:
     """Get an LLM client instance
 
     Args:
-        provider: LLM provider ('openai' or 'claude')
+        provider: LLM provider ('openai', 'azure_openai', or 'claude')
         api_key: API key for the provider
-        model: Model name
+        model: Model name (or Azure deployment name)
+        azure_endpoint: Azure OpenAI endpoint URL
+        api_version: Azure OpenAI API version
+        base_model: Actual model name for reasoning detection (Azure only)
 
     Returns:
         LLMClient instance
     """
     if provider == "openai":
         return OpenAIClient(api_key=api_key, model=model)
+    elif provider == "azure_openai":
+        return AzureOpenAIClient(
+            api_key=api_key,
+            model=model,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version,
+            base_model=base_model,
+        )
     elif provider == "claude":
         # Future: implement Claude client
         raise NotImplementedError("Claude provider not yet implemented")

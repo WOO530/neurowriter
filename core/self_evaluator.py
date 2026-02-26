@@ -166,7 +166,7 @@ class SelfEvaluator:
         response = self.llm_client.generate(
             prompt=user_prompt,
             system_prompt=system_prompt,
-            temperature=0.5,
+            temperature=0.2,
             max_tokens=800,
             reasoning_effort="medium",
         )
@@ -182,7 +182,7 @@ class SelfEvaluator:
             result = json.loads(clean_response)
             score = result.get("score", 5)
             feedback = result.get("feedback", "")
-            improvement = result.get("improvement", None) if score < 7 else None
+            improvement = result.get("improvement", None) if score < 8 else None
 
             return score, feedback, improvement
 

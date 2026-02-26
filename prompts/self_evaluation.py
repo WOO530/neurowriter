@@ -22,21 +22,36 @@ def get_evaluation_prompt(
     Returns:
         Tuple of (system_prompt, user_prompt)
     """
-    system_prompt = """You are an expert evaluator of medical research writing.
+    system_prompt = """You are a STRICT expert evaluator of medical research writing.
 Evaluate the provided introduction against a SPECIFIC criterion, giving:
 1. A numerical score (0-10, where 10 is perfect)
 2. Detailed feedback explaining the score
-3. If score < 7: a specific suggestion for improvement
+3. If score < 8: a specific suggestion for improvement
+
+CALIBRATION ANCHORS — use these to calibrate your scoring:
+- 10: Ready for Nature Medicine / NEJM without any revision
+- 8-9: Strong draft that needs only minor polishing
+- 6-7: Typical first-draft quality with clear areas for improvement
+- 4-5: Below average — multiple significant issues
+- 0-3: Fundamentally flawed
+
+IMPORTANT: Most AI-generated first drafts score 5-7. Score LOW rather than HIGH when uncertain. A score of 8+ should be reserved for genuinely excellent writing that would impress a senior researcher.
 
 Respond ONLY as JSON with this structure:
 {
     "score": NUMBER (0-10),
     "feedback": "Explanation of why this score",
-    "improvement": "Specific actionable suggestion if needed, or null if score >= 7"
+    "improvement": "Specific actionable suggestion if needed, or null if score >= 8"
 }"""
 
-    # Format references for context
-    refs_summary = _format_references_summary(reference_pool)
+    # Criteria that benefit from abstract context for accurate evaluation
+    ABSTRACT_CRITERIA = {"factual_accuracy", "depth", "reference_quality"}
+    use_abstracts = criterion in ABSTRACT_CRITERIA
+    refs_summary = _format_references_summary(
+        reference_pool,
+        include_abstracts=use_abstracts,
+        abstract_max_len=600
+    )
 
     user_prompt = f"""EVALUATE THIS CRITERION:
 Criterion: {criterion.replace('_', ' ').upper()}
@@ -67,6 +82,28 @@ Score and evaluate this introduction on the criterion above."""
     return system_prompt, user_prompt
 
 
+def _format_checklist_items(items: list, max_items: int = 10, max_chars: int = 300) -> str:
+    """Format a list of items as a numbered checklist
+
+    Args:
+        items: List of text items
+        max_items: Maximum number of items to include
+        max_chars: Maximum characters per item
+
+    Returns:
+        Numbered list string like "#1: ...\n#2: ..."
+    """
+    if not items:
+        return "  (none)"
+    lines = []
+    for i, item in enumerate(items[:max_items], 1):
+        text = str(item)[:max_chars]
+        if len(str(item)) > max_chars:
+            text += "..."
+        lines.append(f"  #{i}: {text}")
+    return "\n".join(lines)
+
+
 def _get_criterion_guidelines(criterion: str, topic_analysis: dict, landscape: dict) -> str:
     """Get specific evaluation guidelines for each criterion
 
@@ -80,55 +117,75 @@ def _get_criterion_guidelines(criterion: str, topic_analysis: dict, landscape: d
     """
     guidelines = {
         "topic_specificity": f"""For TOPIC SPECIFICITY (is it specific to {topic_analysis.get('disease')} + {topic_analysis.get('key_intervention_or_focus')} or generic?):
-- Score 9-10: Deeply specific to the exact research question. Mentions {topic_analysis.get('key_intervention_or_focus')} explicitly multiple times with specific findings
-- Score 7-8: Good specificity with some general content
-- Score 5-6: Mix of specific and generic content
-- Score 0-4: Mostly generic; could apply to many related topics""",
+- Score 9-10: Deeply specific to the exact research question. Mentions {topic_analysis.get('key_intervention_or_focus')} explicitly multiple times with specific findings. No more than 1-2 sentences of broad background
+- Score 7-8: Mostly specific but has 1 paragraph of generic background that could apply to related topics
+- Score 5-6: Mix of specific and generic content; several paragraphs could be reused for different studies
+- Score 3-4: Mostly generic; only the final paragraph is specific to this study
+- Score 0-2: Entirely generic; could apply to any study in this field""",
 
         "reference_density": """For REFERENCE DENSITY (citations portfolio and distribution):
-- Score 9-10: Total 15-25 unique references, ≤15% sentences without citations, 30%+ multiple citations (showcasing field consensus). Single citation points max 5 studies [1-5]
-- Score 7-8: Total 12-18 references, ≤20% sentences without citations, 20%+ multiple citations
-- Score 5-6: Total 8-12 references, ≤30% sentences without citations
-- Score 0-4: Total <8 references OR >40% sentences without citations
-Quality check: When citing multiple studies for same claim, verify most impactful/high-tier journals are selected""",
+- Score 9-10: Total 15-25 unique references cited in text, ≤20% sentences without citations, multiple citations where appropriate
+- Score 7-8: Total 10-15 unique references cited, ≤30% sentences without citations
+- Score 5-6: Total 5-10 references cited, ≤50% sentences without citations
+- Score 3-4: Total 3-5 references OR >50% sentences without citations
+- Score 0-2: Total <3 references OR >70% sentences without citations
+Quality check: Count ACTUALLY CITED references in the text (not just available pool size). When citing multiple studies for same claim, verify most impactful/high-tier journals are selected""",
 
         "reference_quality": """For REFERENCE QUALITY (landmark papers, high-impact):
-- Score 9-10: Multiple tier-1 journals cited; landmark papers included
-- Score 7-8: Mix of high-impact and good journals; key papers cited
-- Score 5-6: Mostly lower-tier journals or missing key papers
-- Score 0-4: Poor journal distribution; missing landmark papers""",
+- Score 9-10: Multiple tier-1 journals cited; landmark/seminal papers included; systematic reviews and meta-analyses cited where relevant
+- Score 7-8: Mix of high-impact and good journals; most key papers cited but may miss 1-2 landmark studies
+- Score 5-6: Mostly lower-tier journals or missing several key papers; no meta-analyses cited
+- Score 3-4: Predominantly obscure journals; most landmark papers missing
+- Score 0-2: Poor journal distribution; no landmark papers""",
 
         "academic_tone": """For ACADEMIC TONE (Nature Medicine / NEJM / JAMA Psychiatry level):
-- Score 9-10: Impeccable formal academic writing. Precise terminology. No colloquialisms
-- Score 7-8: Good academic tone with minor issues
-- Score 5-6: Acceptable but some awkward phrasing
-- Score 0-4: Casual tone, vague language, or inconsistent formality""",
+- Score 9-10: Impeccable formal academic writing. Precise terminology. No colloquialisms. Hedging language used appropriately
+- Score 7-8: Good academic tone with 1-2 minor issues (slightly informal phrasing, imprecise hedging)
+- Score 5-6: Acceptable but multiple awkward phrasings or overly promotional language
+- Score 3-4: Noticeably informal or reads like a textbook rather than a research paper
+- Score 0-2: Casual tone, vague language, or inconsistent formality throughout""",
 
         "logical_flow": """For LOGICAL FLOW (coherence, smooth transitions):
-- Score 9-10: Excellent narrative arc. Each paragraph builds on previous. Perfect transitions
-- Score 7-8: Good flow with minor transition issues
-- Score 5-6: Adequate flow but some abrupt topic changes
-- Score 0-4: Disjointed; hard to follow; poor paragraph organization""",
+- Score 9-10: Excellent narrative arc. Each paragraph builds on previous. Perfect transitions. Clear funnel structure (broad → specific → gap → aim)
+- Score 7-8: Good flow with 1-2 minor transition issues or slightly abrupt topic changes
+- Score 5-6: Adequate flow but multiple abrupt topic changes; paragraphs could be reordered without losing coherence
+- Score 3-4: Disjointed sections; unclear why paragraphs are in current order
+- Score 0-2: No logical structure; reads like a list of disconnected facts""",
 
         "depth": """For DEPTH (substantive detail, avoiding superficiality):
-- Score 9-10: Each claim has supporting evidence/detail. Nuanced discussion
-- Score 7-8: Good detail with minor superficial claims
-- Score 5-6: Mix of detailed and superficial content
-- Score 0-4: Many unsupported claims; lacks depth""",
+- Score 9-10: Each claim has supporting evidence/detail. Nuanced discussion of mechanisms, effect sizes, or methodological considerations
+- Score 7-8: Good detail overall but 2-3 claims are stated without supporting evidence or specifics
+- Score 5-6: Mix of detailed and superficial content; many claims are surface-level summaries
+- Score 3-4: Mostly superficial; reads like an abstract rather than an introduction
+- Score 0-2: No substantive detail; entirely unsupported generalizations""",
 
         "completeness": f"""For COMPLETENESS (covers key concepts from landscape):
-Knowledge gaps identified: {len(landscape.get('knowledge_gaps', []))}
-Key findings that should be mentioned: {len(landscape.get('key_findings', []))}
-- Score 9-10: Addresses all/nearly all key findings and gaps
-- Score 7-8: Covers most key areas
-- Score 5-6: Covers about half of key areas
-- Score 0-4: Misses major areas""",
+
+KEY FINDINGS that should be mentioned ({len(landscape.get('key_findings', []))} total):
+{_format_checklist_items(landscape.get('key_findings', []), max_items=10, max_chars=300)}
+
+KNOWLEDGE GAPS that should be addressed ({len(landscape.get('knowledge_gaps', []))} total):
+{_format_checklist_items(landscape.get('knowledge_gaps', []), max_items=10, max_chars=300)}
+
+- Score 9-10: Addresses all/nearly all key findings and gaps listed above; clear research rationale emerges
+- Score 7-8: Covers most key areas but misses 1-2 important findings or gaps
+- Score 5-6: Covers about half of key areas; several important themes absent
+- Score 3-4: Misses multiple major areas; incomplete picture of the field
+- Score 0-2: Covers only a narrow slice; most key areas absent
+
+In your feedback, LIST which specific items above are MISSING from the introduction by their number (e.g., "Missing key finding #3, #7 and knowledge gap #2, #4"). Be specific about WHAT is missing, not just HOW MANY items are missing.""",
 
         "factual_accuracy": """For FACTUAL ACCURACY (claims match cited references):
-- Score 9-10: All claims accurately reflect cited papers. No misrepresentations
-- Score 7-8: Minor inaccuracies or unsupported claims (1-2)
-- Score 5-6: Several questionable claims or misattributions (3-5)
-- Score 0-4: Significant factual errors or many unsupported claims"""
+- Score 9-10: All claims accurately reflect cited papers with correct specifics (sample sizes, effect sizes, conclusions)
+- Score 7-8: Minor inaccuracies (1-2) such as slightly imprecise paraphrasing, but no clear misrepresentations
+- Score 5-6: Several claims (3-5) that cannot be verified from the provided abstracts, OR 1-2 clear misrepresentations of cited sources. Overgeneralizations from single studies count as inaccuracies
+- Score 3-4: Multiple clear misrepresentations or fabricated specifics not found in cited abstracts
+- Score 0-2: Systematic misattributions or fabricated claims
+
+STRICT RULES:
+- Claims with specific numbers (sample sizes, percentages, p-values) MUST be verifiable from the cited abstract. If not verifiable → max score 6
+- Overgeneralization (e.g., citing one study but writing "studies have shown") counts as an inaccuracy
+- "Not verifiable from abstract" for general claims is acceptable, but for specific quantitative claims it is NOT acceptable"""
     }
 
     return guidelines.get(criterion, "Evaluate this criterion fairly and objectively.")
@@ -167,31 +224,45 @@ def _format_landscape_summary(landscape: dict) -> str:
 
     field_overview = landscape.get("field_overview", "")
     if field_overview:
-        lines.append(f"Overview: {field_overview[:200]}...")
+        lines.append(f"Overview: {field_overview[:400]}")
 
     key_findings = landscape.get("key_findings", [])
     if key_findings:
         lines.append(f"\nKey Findings ({len(key_findings)}):")
-        for finding in key_findings[:3]:
-            lines.append(f"  - {finding[:80]}...")
+        for i, finding in enumerate(key_findings[:8], 1):
+            lines.append(f"  #{i}: {finding[:200]}")
 
     knowledge_gaps = landscape.get("knowledge_gaps", [])
     if knowledge_gaps:
         lines.append(f"\nKnowledge Gaps ({len(knowledge_gaps)}):")
-        for gap in knowledge_gaps[:3]:
-            lines.append(f"  - {gap[:80]}...")
+        for i, gap in enumerate(knowledge_gaps[:8], 1):
+            lines.append(f"  #{i}: {gap[:200]}")
 
     return "\n".join(lines) if lines else "Landscape analysis not available"
 
 
-def _format_references_summary(reference_pool: list) -> str:
+def _format_references_summary(
+    reference_pool: list,
+    include_abstracts: bool = False,
+    abstract_max_len: int = 400
+) -> str:
     """Format reference pool summary with paper titles for accurate evaluation
 
     Includes each paper's number, first author, title, journal, and year
     so the evaluator can judge whether cited claims match actual papers.
 
+    When include_abstracts=True, appends a truncated abstract snippet to each
+    paper entry. This gives the evaluator enough context (objective + key
+    findings) to judge factual accuracy, depth, and reference quality without
+    relying solely on titles.
+
     Args:
         reference_pool: List of reference papers
+        include_abstracts: Whether to include abstract snippets (for criteria
+            that need content-level evaluation: factual_accuracy, depth,
+            reference_quality)
+        abstract_max_len: Max characters per abstract snippet (default 400,
+            covering ~2-3 sentences: objective + key findings)
 
     Returns:
         Formatted summary
@@ -231,5 +302,14 @@ def _format_references_summary(reference_pool: list) -> str:
         journal = paper.get("journal", "")
         year = paper.get("pub_year", "")
         summary_lines.append(f"  [{i}] {first_author}. {title}. {journal} {year}")
+
+        # Append abstract snippet for criteria that need content-level context
+        if include_abstracts:
+            abstract = paper.get("abstract", "")
+            if abstract:
+                snippet = abstract[:abstract_max_len]
+                if len(abstract) > abstract_max_len:
+                    snippet += "..."
+                summary_lines.append(f"      Abstract: {snippet}")
 
     return "\n".join(summary_lines)

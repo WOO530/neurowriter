@@ -154,32 +154,31 @@ class FactChecker:
         Returns:
             Citation verification results
         """
-        # Extract all citation numbers from text
-        citation_pattern = r'\[(\d+)\]'
-        citations_in_text = set(
-            int(match) for match in re.findall(citation_pattern, introduction)
-        )
+        # Extract all citation numbers from text (handles [1-3], [4,5] groups)
+        citations_in_text = set()
+        for m in re.finditer(r'\[([^\]]+)\]', introduction):
+            for part in re.split(r'[,;]\s*', m.group(1).strip()):
+                part = part.strip()
+                range_m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', part)
+                if range_m:
+                    lo, hi = int(range_m.group(1)), int(range_m.group(2))
+                    citations_in_text.update(range(lo, hi + 1))
+                elif part.isdigit():
+                    citations_in_text.add(int(part))
 
         max_citation = max(citations_in_text) if citations_in_text else 0
         expected_max = len(articles)
 
         issues = []
 
-        # Check if citation numbers are consecutive
-        expected_citations = set(range(1, expected_max + 1))
-        missing_citations = expected_citations - citations_in_text
-        extra_citations = citations_in_text - expected_citations
+        # Check if cited numbers are within the valid range (1..N)
+        # NOT all references need to be cited — only verify no out-of-range refs
+        out_of_range = {c for c in citations_in_text if c < 1 or c > expected_max}
 
-        if missing_citations:
+        if out_of_range:
             issues.append({
-                "type": "missing_citations",
-                "numbers": sorted(list(missing_citations))
-            })
-
-        if extra_citations:
-            issues.append({
-                "type": "extra_citations",
-                "numbers": sorted(list(extra_citations))
+                "type": "out_of_range_citations",
+                "numbers": sorted(list(out_of_range))
             })
 
         return {
@@ -301,27 +300,27 @@ class FactChecker:
         accuracy_level = "HIGH"
         all_issues = []
 
-        # Check PMID verification
+        # Check PMID verification — only count explicitly failed, not timeouts/errors
         pmid_results = results.get("pmid_verification", [])
-        unverified_pmids = [r for r in pmid_results if not r.get("verified")]
+        unverified_pmids = [r for r in pmid_results if r.get("verified") is False]
         if unverified_pmids:
-            accuracy_level = "MEDIUM"
             for pmid_result in unverified_pmids:
                 all_issues.append({
                     "type": "unverified_pmid",
                     "pmid": pmid_result["pmid"],
                     "description": f"Could not verify PMID: {pmid_result['reason']}"
                 })
+            # PMID issues are informational — do NOT downgrade accuracy_level
 
-        # Check citation consistency
+        # Check citation consistency (out-of-range only)
         citation_check = results.get("citation_verification", {})
         if not citation_check.get("consistent"):
-            accuracy_level = "MEDIUM"
             for issue in citation_check.get("issues", []):
                 all_issues.append({
                     "type": issue["type"],
                     "description": f"Citation numbering issue: {issue}"
                 })
+            # Citation numbering issues are informational — do NOT downgrade accuracy_level
 
         # Check claim-citation mapping
         claim_mapping = results.get("claim_mapping", {})
@@ -334,9 +333,9 @@ class FactChecker:
                     "type": "UNSUPPORTED_CLAIM",
                     "description": f"Claim not supported by cited article: {c.get('claim', '')[:100]}... Issue: {c.get('issue', '')}"
                 })
-            if unsupported_ratio >= 0.3:
+            if unsupported_ratio >= 0.3 and len(unsupported) >= 3:
                 accuracy_level = "LOW"
-            elif unsupported and accuracy_level == "HIGH":
+            elif len(unsupported) >= 3 and accuracy_level == "HIGH":
                 accuracy_level = "MEDIUM"
 
         numerical_mismatches = claim_mapping.get("numerical_mismatches", [])

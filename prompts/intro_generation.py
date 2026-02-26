@@ -12,6 +12,7 @@ def get_introduction_generation_prompt(
     writing_strategy: dict = None,
     evaluation_feedback: dict = None,
     unsupported_claims: list = None,
+    user_feedback: str = "",
 ) -> tuple[str, str]:
     """Get system and user prompts for introduction generation
 
@@ -24,6 +25,7 @@ def get_introduction_generation_prompt(
         writing_strategy: Optional writing strategy with paragraph outline
         evaluation_feedback: Optional evaluation results from previous iteration
         unsupported_claims: Optional list of unsupported claims from previous iteration
+        user_feedback: Optional user-provided feedback for revision (high priority)
 
     Returns:
         Tuple of (system_prompt, user_prompt)
@@ -44,13 +46,16 @@ YOUR WRITING VOICE:
 
 CITATION RULES (CRITICAL):
 1. Use ONLY the provided references. Do NOT fabricate or hallucinate any citations.
-2. Reference Portfolio: Use 15-35 unique references total (30-50 provided). Aim for high-density, purposeful citation coverage.
-3. Citation Coverage: Attach citations to MOST factual statements, statistics, findings, and assertions. Sentences without citations should comprise no more than 20% of the introduction (exceptions: logical transitions, study aims, background context).
+2. Reference Portfolio: Use 10-20 unique references total. Aim for purposeful, targeted citation coverage.
+3. Citation Coverage: Cite specific empirical findings, statistics, and study results.
+   Common knowledge (disease definitions, well-known prevalence), logical transitions,
+   conceptual framing, and study aims do NOT require citations.
+   Roughly 50-70% of sentences should have citations; the rest carry the narrative.
 4. Multiple Independent Claims: When a single sentence contains multiple distinct factual claims, each MUST be cited separately.
    - BAD: "Depression affects 280 million people and is the leading cause of disability [1]."
    - GOOD: "Depression affects approximately 280 million people [1] and is among the leading causes of disability worldwide [2]."
 5. Multiple Supporting Studies: When multiple studies support the same claim, cite them together using ranges: [3-5] or [3,4,5]. TARGET: 30-40% of your citations should be multiple (not single), showcasing consensus in the field.
-6. Citation Density: Aim for approximately one citation per 60-80 words (medical baseline is ~1 per 95 words, but introduction should be denser). For a 600-800 word introduction, expect 10-15 distinct citation points.
+6. Citation Density: Aim for approximately one citation per 80-120 words. For a 450-650 word introduction, expect 6-9 distinct citation points.
 7. Quality Over Quantity Per Point: MAXIMUM 5 studies per single citation point [1-5]. Do not pad citations unnecessarily; use only most impactful, directly relevant papers.
 8. Sequential Numbering: Number citations sequentially as they appear in the text. If revisions occur, renumber for consistency.
 9. Claim-Source Fidelity: Each cited claim MUST match the strength and specificity of the original source.
@@ -112,8 +117,10 @@ SYNTHESIS REQUIREMENTS (CRITICAL):
 
     # Format evaluation feedback for self-evolution
     feedback_context = ""
-    if evaluation_feedback or unsupported_claims:
-        feedback_context = _format_evaluation_feedback(evaluation_feedback, unsupported_claims)
+    if evaluation_feedback or unsupported_claims or user_feedback:
+        feedback_context = _format_evaluation_feedback(
+            evaluation_feedback, unsupported_claims, user_feedback=user_feedback
+        )
 
     # Format concept hierarchy as a narrowing chain
     concept_text = ""
@@ -150,10 +157,11 @@ REQUIRED SECTIONS (in order — you may combine adjacent sections into a single 
 4. **Study Rationale & Aims**: Synthesis of unmet needs — why combining {data_type} with {methodology} is important, what remains unclear; clear statement of your study's purpose, novelty, and expected contributions
 
 SPECIFICATIONS:
-- LENGTH: 3-5 paragraphs, approximately 600-800 words. This is a STRICT upper limit — do NOT exceed 800 words. Write concisely: every sentence must earn its place.
+- LENGTH: 3-5 paragraphs, approximately 450-650 words. This is a STRICT upper limit — do NOT exceed 650 words. Write concisely: every sentence must earn its place.
+- DENSITY: If approaching the word limit, cut granular numerical details and individual case descriptions first. Preserve the core logical flow: disease burden → diagnostic/therapeutic gap → methodological approach → study aims.
 - FORMAT: Separate each paragraph with a blank line. Do NOT output as a single block of text.
 - TONE: Follow the academic examples provided above
-- CITATIONS: Target 10-15 citation points across the introduction. Use 12-25 unique references total. See citation rules above for flexible strategy (1-5 per point, 30-40% multiple citations)
+- CITATIONS: Target 6-9 citation points across the introduction. Use 10-20 unique references total. See citation rules above for flexible strategy (1-5 per point, 30-40% multiple citations)
 - FLOW: Smooth transitions between sections; avoid abrupt topic changes
 - VOCABULARY: Use precise medical/neuroscience terminology
 
@@ -189,36 +197,36 @@ def _format_landscape_context(landscape: dict, parsed_topic: dict) -> str:
     Returns:
         Formatted landscape context string
     """
-    lines = ["LITERATURE LANDSCAPE CONTEXT (use to inform your introduction):"]
+    lines = ["LITERATURE LANDSCAPE CONTEXT (address ALL items below in your introduction):"]
 
     # Field overview
     field_overview = landscape.get("field_overview", "")
     if field_overview:
         lines.append(f"\nField Overview:")
-        lines.append(f"  {field_overview[:500]}")
+        lines.append(f"  {field_overview[:800]}")
 
     # Key findings
     key_findings = landscape.get("key_findings", [])
     if key_findings:
-        lines.append(f"\nKey Findings in the Literature ({len(key_findings)} identified):")
-        for finding in key_findings[:5]:
-            lines.append(f"  - {finding[:200]}")
+        lines.append(f"\nKey Findings in the Literature ({len(key_findings)} identified — address ALL):")
+        for i, finding in enumerate(key_findings[:10], 1):
+            lines.append(f"  #{i}: {finding[:300]}")
 
     # Knowledge gaps
     knowledge_gaps = landscape.get("knowledge_gaps", [])
     if knowledge_gaps:
-        lines.append(f"\nIdentified Knowledge Gaps ({len(knowledge_gaps)} identified):")
-        for gap in knowledge_gaps[:5]:
-            lines.append(f"  - {gap[:200]}")
+        lines.append(f"\nIdentified Knowledge Gaps ({len(knowledge_gaps)} identified — address ALL):")
+        for i, gap in enumerate(knowledge_gaps[:10], 1):
+            lines.append(f"  #{i}: {gap[:300]}")
 
     # Methodological trends
     trends = landscape.get("methodological_trends", [])
     if trends:
         lines.append(f"\nMethodological Trends:")
-        for trend in trends[:3]:
-            lines.append(f"  - {trend[:200]}")
+        for i, trend in enumerate(trends[:5], 1):
+            lines.append(f"  #{i}: {trend[:300]}")
 
-    lines.append("\nUse this context to ensure your introduction is specific to the research landscape and addresses key gaps.\n")
+    lines.append("\nIMPORTANT: Your introduction must address ALL key findings and knowledge gaps listed above. Missing items will lower the completeness score.\n")
     return "\n".join(lines)
 
 
@@ -305,17 +313,26 @@ def _format_writing_strategy(writing_strategy: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_evaluation_feedback(evaluation_feedback: dict, unsupported_claims: list) -> str:
+def _format_evaluation_feedback(
+    evaluation_feedback: dict,
+    unsupported_claims: list,
+    user_feedback: str = ""
+) -> str:
     """Format evaluation feedback and unsupported claims for self-evolution
 
     Args:
         evaluation_feedback: Evaluation results dict with scores and feedback
         unsupported_claims: List of claim dicts with 'claim', 'issue', 'needed_evidence'
+        user_feedback: Optional user-provided feedback (high priority)
 
     Returns:
         Formatted feedback context string
     """
     lines = ["PREVIOUS ISSUES (MUST address in this revision):"]
+
+    if user_feedback:
+        lines.append("\nUSER FEEDBACK (high priority — address this first):")
+        lines.append(f"  {user_feedback.strip()}")
 
     if evaluation_feedback:
         scores = evaluation_feedback.get("scores", {})
@@ -325,7 +342,7 @@ def _format_evaluation_feedback(evaluation_feedback: dict, unsupported_claims: l
         # Extract criteria with low scores
         weak_criteria = []
         for criterion, score in scores.items():
-            if isinstance(score, (int, float)) and score < 7:
+            if isinstance(score, (int, float)) and score < 8:
                 criterion_feedback = feedback.get(criterion, "")
                 weak_criteria.append((criterion, score, criterion_feedback))
 

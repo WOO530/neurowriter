@@ -65,8 +65,20 @@ def initialize_session():
         # Orchestrator recreation
         "api_key_stored": "",
         "model_stored": "",
+        "provider_stored": "openai",
+        "azure_endpoint_stored": "",
+        "azure_deployment_stored": "",
+        "azure_api_version_stored": "2024-12-01-preview",
+        "azure_base_model_stored": "",
         # Additional research UI flag (Issue 2)
         "show_additional_research": False,
+        # Self-evolution user participation
+        "evolution_auto_mode": False,
+        "user_evolution_feedback": "",
+        "evolution_claims": [],
+        "evolution_completeness_gaps": [],
+        "evolution_queries": [],
+        "evolution_details": [],
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -81,6 +93,9 @@ def reset_pipeline():
         "writing_strategy", "introduction_text", "evaluation_result",
         "iteration_history", "generation_result", "current_topic",
         "fact_check_result",
+        "evolution_auto_mode", "user_evolution_feedback",
+        "evolution_claims", "evolution_completeness_gaps",
+        "evolution_queries", "evolution_details",
     ]
     defaults = {
         "pipeline_state": "IDLE",
@@ -98,6 +113,12 @@ def reset_pipeline():
         "current_topic": None,
         "fact_check_result": None,
         "show_additional_research": False,
+        "evolution_auto_mode": False,
+        "user_evolution_feedback": "",
+        "evolution_claims": [],
+        "evolution_completeness_gaps": [],
+        "evolution_queries": [],
+        "evolution_details": [],
     }
     for k in keys:
         st.session_state[k] = defaults.get(k)
@@ -108,10 +129,28 @@ def get_orchestrator() -> Optional[PipelineOrchestrator]:
     """Create PipelineOrchestrator from stored credentials"""
     api_key = st.session_state.get("api_key_stored", "")
     model = st.session_state.get("model_stored", "gpt-4o")
-    if not api_key or not api_key.startswith("sk-"):
+    provider = st.session_state.get("provider_stored", "openai")
+
+    if not api_key:
         return None
+
+    if provider == "openai" and not api_key.startswith("sk-"):
+        return None
+
+    if provider == "azure_openai":
+        azure_endpoint = st.session_state.get("azure_endpoint_stored", "")
+        if not azure_endpoint:
+            return None
+
     try:
-        return PipelineOrchestrator(api_key=api_key, model=model)
+        return PipelineOrchestrator(
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            azure_endpoint=st.session_state.get("azure_endpoint_stored") or None,
+            api_version=st.session_state.get("azure_api_version_stored") or None,
+            base_model=st.session_state.get("azure_base_model_stored") or None,
+        )
     except Exception as e:
         logger.error(f"Failed to create orchestrator: {e}")
         return None
@@ -136,23 +175,76 @@ def setup_sidebar():
     with st.sidebar:
         st.markdown("## ⚙️ 설정")
 
-        # API Key input
+        # Provider selection
+        provider = st.selectbox(
+            "LLM Provider",
+            ["OpenAI", "Azure OpenAI"],
+            index=0,
+        )
+        provider_key = "openai" if provider == "OpenAI" else "azure_openai"
+
+        # API Key input (common to both providers)
         api_key = st.text_input(
-            "OpenAI API Key",
+            "API Key",
             type="password",
-            help="https://platform.openai.com/api-keys에서 발급받으세요"
+            help=(
+                "https://platform.openai.com/api-keys에서 발급받으세요"
+                if provider_key == "openai"
+                else "Azure OpenAI 리소스의 API 키를 입력하세요"
+            ),
         )
 
-        # Model selector
-        model = st.selectbox(
-            "LLM Model",
-            ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-5", "gpt-5.2"],
-            index=4
-        )
+        if provider_key == "openai":
+            # OpenAI: model selector
+            model = st.selectbox(
+                "LLM Model",
+                ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-5", "gpt-5.2"],
+                index=4,
+            )
+            st.session_state.azure_endpoint_stored = ""
+            st.session_state.azure_deployment_stored = ""
+            st.session_state.azure_api_version_stored = "2024-12-01-preview"
+            st.session_state.azure_base_model_stored = ""
+        else:
+            # Azure OpenAI: endpoint, deployment, api version, base model
+            azure_endpoint = st.text_input(
+                "Azure Endpoint",
+                placeholder="https://your-resource.openai.azure.com/",
+                help="Azure OpenAI 리소스의 엔드포인트 URL",
+            )
+            model = st.text_input(
+                "Deployment Name",
+                placeholder="gpt-51-deployment",
+                help="Azure OpenAI 배포 이름",
+            )
+            azure_api_version = st.text_input(
+                "API Version",
+                value="2024-12-01-preview",
+                help="Azure OpenAI API 버전",
+            )
+            base_model_option = st.selectbox(
+                "Base Model",
+                ["gpt-5.1", "gpt-4o", "gpt-4o-mini", "기타 (직접 입력)"],
+                index=0,
+                help="실제 배포된 모델명 (reasoning model 감지에 사용)",
+            )
+            if base_model_option == "기타 (직접 입력)":
+                azure_base_model = st.text_input(
+                    "Base Model 이름",
+                    placeholder="gpt-4-turbo",
+                )
+            else:
+                azure_base_model = base_model_option
+
+            st.session_state.azure_endpoint_stored = azure_endpoint
+            st.session_state.azure_api_version_stored = azure_api_version
+            st.session_state.azure_base_model_stored = azure_base_model
+            st.session_state.azure_deployment_stored = model
 
         # Store for orchestrator recreation
         st.session_state.api_key_stored = api_key
         st.session_state.model_stored = model
+        st.session_state.provider_stored = provider_key
 
         # Reference style
         st.markdown("### 참고문헌 스타일")
@@ -186,6 +278,7 @@ def setup_sidebar():
                 "CONFIRM_STRATEGY": "전략 확인 대기",
                 "GENERATING": "Introduction 작성 중",
                 "EVALUATING": "품질 평가 중",
+                "CONFIRM_EVOLUTION": "개선 확인 대기",
                 "SELF_EVOLVING": "자동 개선 중",
                 "COMPLETE": "완료",
             }
@@ -239,8 +332,15 @@ def render_idle_state():
             st.error("연구 주제를 입력하세요")
             return
         api_key = st.session_state.api_key_stored
-        if not api_key or not api_key.startswith("sk-"):
+        provider = st.session_state.get("provider_stored", "openai")
+        if not api_key:
+            st.error("API 키를 입력하세요")
+            return
+        if provider == "openai" and not api_key.startswith("sk-"):
             st.error("유효한 OpenAI API 키를 입력하세요")
+            return
+        if provider == "azure_openai" and not st.session_state.get("azure_endpoint_stored"):
+            st.error("Azure Endpoint를 입력하세요")
             return
 
         st.session_state.current_topic = topic
@@ -671,10 +771,14 @@ def render_generating_state():
                 st.session_state.landscape,
                 writing_strategy=st.session_state.get("writing_strategy"),
             )
-            # Validate citation range
+            # Validate citation range and renumber
             introduction = PipelineOrchestrator.validate_citation_range(
                 introduction, len(st.session_state.reference_pool)
             )
+            introduction, st.session_state.reference_pool = \
+                PipelineOrchestrator.renumber_citations(
+                    introduction, st.session_state.reference_pool
+                )
             st.session_state.introduction_text = introduction
             st.session_state.pipeline_state = "EVALUATING"
             st.rerun()
@@ -712,13 +816,16 @@ def render_evaluating_state():
                 )
                 st.session_state.fact_check_result = fact_result
 
-                # Adjust factual_accuracy based on fact-check
+                # Adjust factual_accuracy based on fact-check (soft adjustment)
                 fc_accuracy = fact_result.get("overall_accuracy", "HIGH")
                 current_fa = evaluation.get("scores", {}).get("factual_accuracy", 10)
                 if fc_accuracy == "LOW":
-                    evaluation["scores"]["factual_accuracy"] = min(current_fa, 5)
+                    adjusted = max(current_fa - 2, 4)
                 elif fc_accuracy == "MEDIUM":
-                    evaluation["scores"]["factual_accuracy"] = min(current_fa, 6)
+                    adjusted = max(current_fa - 1, 5)
+                else:
+                    adjusted = current_fa
+                evaluation["scores"]["factual_accuracy"] = adjusted
 
                 # Recalculate overall score
                 scores = evaluation.get("scores", {})
@@ -743,7 +850,10 @@ def render_evaluating_state():
                 orch.needs_self_evolution(evaluation)
                 and st.session_state.pipeline_iteration < MAX_EVOLUTION_ITERATIONS
             ):
-                st.session_state.pipeline_state = "SELF_EVOLVING"
+                if st.session_state.get("evolution_auto_mode", False):
+                    st.session_state.pipeline_state = "SELF_EVOLVING"
+                else:
+                    st.session_state.pipeline_state = "CONFIRM_EVOLUTION"
             else:
                 st.session_state.pipeline_state = "COMPLETE"
 
@@ -755,6 +865,166 @@ def render_evaluating_state():
             # Still go to COMPLETE with what we have
             st.session_state.pipeline_state = "COMPLETE"
             st.rerun()
+
+
+def render_confirm_evolution_state():
+    """CONFIRM_EVOLUTION: User reviews evaluation and decides whether to evolve"""
+    iteration = st.session_state.pipeline_iteration
+    next_iteration = iteration + 1
+    st.markdown(f"## 자동 개선 확인 (Iteration {next_iteration}/{MAX_EVOLUTION_ITERATIONS})")
+
+    evaluation = st.session_state.evaluation_result
+    if not evaluation:
+        st.session_state.pipeline_state = "COMPLETE"
+        st.rerun()
+        return
+
+    orch = get_orchestrator()
+    if not orch:
+        st.error("API 키를 확인하세요")
+        st.session_state.pipeline_state = "COMPLETE"
+        st.rerun()
+        return
+
+    # --- 1. Score summary metrics ---
+    overall_score = evaluation.get("overall_score", 0)
+    factual_acc = evaluation.get("scores", {}).get("factual_accuracy", 0)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("종합 점수", f"{overall_score}/10")
+    with col2:
+        st.metric("Factual Accuracy", f"{factual_acc}/10")
+    with col3:
+        label = "Draft" if iteration == 0 else f"Draft + {iteration} Rev"
+        st.metric("현재 Iteration", label)
+
+    # --- 2. Detailed score grid (reuse existing helper) ---
+    display_self_evaluation_results(evaluation)
+
+    # --- 3. Key issues: low-scoring criteria feedback ---
+    scores = evaluation.get("scores", {})
+    feedback = evaluation.get("feedback", {})
+    improvements = evaluation.get("improvements", [])
+    weak = [(k, v, feedback.get(k, "")) for k, v in scores.items()
+            if isinstance(v, (int, float)) and v < 8]
+
+    # --- Introduction preview ---
+    st.markdown("### 현재 Introduction")
+    with st.expander("Introduction 미리보기", expanded=False):
+        st.markdown(st.session_state.introduction_text)
+
+    if weak:
+        st.markdown("### 주요 이슈")
+        for criterion, score, fb in weak:
+            with st.expander(f"**{criterion.replace('_', ' ').title()}** (점수: {score}/10)", expanded=True):
+                st.warning(fb)
+                for imp in improvements:
+                    if imp.get("criterion") == criterion and imp.get("improvement"):
+                        st.info(f"개선 제안: {imp['improvement']}")
+                        break
+
+    # --- 4. Extract unsupported claims (cache to avoid re-running) ---
+    if not st.session_state.evolution_claims:
+        with st.spinner("미지지 클레임 분석 중..."):
+            claims = orch.extract_unsupported_claims(
+                evaluation, st.session_state.introduction_text
+            )
+            st.session_state.evolution_claims = claims
+
+    claims = st.session_state.evolution_claims
+    if claims:
+        st.markdown(f"### 미지지 클레임 ({len(claims)}개)")
+        for i, claim_info in enumerate(claims, 1):
+            claim_text = claim_info.get("claim", "")
+            issue = claim_info.get("issue", "")
+            needed = claim_info.get("needed_evidence", "")
+            with st.expander(f"Claim {i}: {claim_text[:80]}{'...' if len(claim_text) > 80 else ''}", expanded=False):
+                st.write(f"**원문:** {claim_text}")
+                if issue:
+                    st.write(f"**이슈:** {issue}")
+                if needed:
+                    st.write(f"**필요한 근거:** {needed}")
+    else:
+        st.info("미지지 클레임이 발견되지 않았습니다.")
+
+    # --- 4b. Extract completeness gaps (cache to avoid re-running) ---
+    comp_score = scores.get("completeness", 10)
+    if not st.session_state.get("evolution_completeness_gaps") and comp_score < 8:
+        with st.spinner("Completeness gap 분석 중..."):
+            comp_gaps = orch.extract_completeness_gaps(
+                evaluation, st.session_state.introduction_text,
+                st.session_state.landscape
+            )
+            st.session_state.evolution_completeness_gaps = comp_gaps
+
+    comp_gaps = st.session_state.get("evolution_completeness_gaps", [])
+    if comp_gaps:
+        st.markdown(f"### Completeness Gaps ({len(comp_gaps)}개)")
+        for i, gap_info in enumerate(comp_gaps, 1):
+            source = gap_info.get("source", "")
+            item_num = gap_info.get("item_number", "?")
+            item_text = gap_info.get("item_text", "")
+            gap_desc = gap_info.get("gap_description", "")
+            needed = gap_info.get("needed_evidence", "")
+            label = f"{'Key Finding' if source == 'key_finding' else 'Knowledge Gap'} #{item_num}"
+            with st.expander(f"Gap {i}: {label} — {item_text[:60]}{'...' if len(item_text) > 60 else ''}", expanded=False):
+                st.write(f"**누락 항목:** {item_text}")
+                if gap_desc:
+                    st.write(f"**설명:** {gap_desc}")
+                if needed:
+                    st.write(f"**필요한 근거:** {needed}")
+
+    # --- 5. Generate supplementary query plan (cache) ---
+    # Merge claims + completeness gaps for query generation
+    all_items_for_queries = list(claims) + orch._completeness_gaps_as_claims(comp_gaps)
+    if all_items_for_queries and not st.session_state.evolution_queries:
+        with st.spinner("보충 검색 쿼리 생성 중..."):
+            queries = orch.generate_supplementary_queries(
+                all_items_for_queries, st.session_state.topic_analysis
+            )
+            st.session_state.evolution_queries = queries
+
+    queries = st.session_state.evolution_queries
+    if queries:
+        st.markdown(f"### 보충 검색 쿼리 계획 ({len(queries)}개)")
+        for i, q in enumerate(queries, 1):
+            st.write(f"  {i}. `{q}`")
+
+    # --- 6. User feedback input ---
+    st.markdown("### 사용자 피드백 (선택사항)")
+    user_fb = st.text_area(
+        "추가 피드백",
+        value=st.session_state.get("user_evolution_feedback", ""),
+        placeholder="예: '두 번째 문단의 딥러닝 부분을 더 구체적으로 작성해줘' 또는 '특정 논문을 더 강조해줘'",
+        height=80,
+        key="evolution_feedback_input"
+    )
+
+    # --- 7. Action buttons ---
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        proceed_btn = st.button("자동 개선 진행", key="evolution_proceed_btn")
+    with col2:
+        auto_btn = st.button("이후 자동 (전체)", key="evolution_auto_btn",
+                              help="이후 iteration은 확인 없이 자동 진행합니다")
+    with col3:
+        accept_btn = st.button("현재 버전 수락", key="evolution_accept_btn")
+
+    if proceed_btn:
+        st.session_state.user_evolution_feedback = user_fb
+        st.session_state.pipeline_state = "SELF_EVOLVING"
+        st.rerun()
+
+    if auto_btn:
+        st.session_state.user_evolution_feedback = user_fb
+        st.session_state.evolution_auto_mode = True
+        st.session_state.pipeline_state = "SELF_EVOLVING"
+        st.rerun()
+
+    if accept_btn:
+        st.session_state.pipeline_state = "COMPLETE"
+        st.rerun()
 
 
 def render_self_evolving_state():
@@ -771,28 +1041,60 @@ def render_self_evolving_state():
 
     status_container = st.status("Self-evolution 진행 중...", expanded=True)
 
+    # Retrieve user feedback
+    user_feedback = st.session_state.get("user_evolution_feedback", "")
+
     try:
         with status_container:
-            # Step 1: Extract unsupported claims
-            st.write("미지지 클레임 추출 중...")
-            claims = orch.extract_unsupported_claims(
-                st.session_state.evaluation_result,
-                st.session_state.introduction_text
-            )
-            st.write(f"  {len(claims)}개 미지지 클레임 발견")
+            # Step 1: Extract unsupported claims (reuse cache if available)
+            cached_claims = st.session_state.get("evolution_claims", [])
+            if cached_claims:
+                claims = cached_claims
+                st.write(f"캐시된 미지지 클레임 사용: {len(claims)}개")
+            else:
+                st.write("미지지 클레임 추출 중...")
+                claims = orch.extract_unsupported_claims(
+                    st.session_state.evaluation_result,
+                    st.session_state.introduction_text
+                )
+                st.write(f"  {len(claims)}개 미지지 클레임 발견")
 
-            if not claims:
-                st.write("미지지 클레임이 없습니다. 완료로 이동합니다.")
+            # Step 1b: Extract completeness gaps (reuse cache if available)
+            cached_comp_gaps = st.session_state.get("evolution_completeness_gaps", [])
+            if cached_comp_gaps:
+                comp_gaps = cached_comp_gaps
+                st.write(f"캐시된 completeness gap 사용: {len(comp_gaps)}개")
+            else:
+                st.write("Completeness gap 추출 중...")
+                comp_gaps = orch.extract_completeness_gaps(
+                    st.session_state.evaluation_result,
+                    st.session_state.introduction_text,
+                    st.session_state.landscape,
+                )
+                if comp_gaps:
+                    st.write(f"  {len(comp_gaps)}개 completeness gap 발견")
+                else:
+                    st.write("  Completeness gap 없음 (점수 충분)")
+
+            if not claims and not comp_gaps:
+                st.write("개선할 항목이 없습니다. 완료로 이동합니다.")
                 st.session_state.pipeline_state = "COMPLETE"
                 st.rerun()
                 return
 
-            # Step 2: Generate supplementary queries
-            st.write("보충 쿼리 생성 중...")
-            queries = orch.generate_supplementary_queries(
-                claims, st.session_state.topic_analysis
-            )
-            st.write(f"  {len(queries)}개 보충 쿼리 생성")
+            # Step 2: Generate supplementary queries (reuse cache if available)
+            # Merge claims + completeness gaps for query generation
+            all_items_for_queries = list(claims) + orch._completeness_gaps_as_claims(comp_gaps)
+            cached_queries = st.session_state.get("evolution_queries", [])
+            if cached_queries:
+                queries = cached_queries
+                st.write(f"캐시된 보충 쿼리 사용: {len(queries)}개")
+            else:
+                st.write("보충 쿼리 생성 중...")
+                queries = orch.generate_supplementary_queries(
+                    all_items_for_queries, st.session_state.topic_analysis
+                )
+                st.write(f"  {len(queries)}개 보충 쿼리 생성")
 
             # Step 3: Search PubMed
             st.write("PubMed 보충 검색 중...")
@@ -816,6 +1118,8 @@ def render_self_evolving_state():
                 st.write(f"  Reference pool: {old_size} -> {len(new_ref_pool)}편")
 
             # Step 5: Regenerate introduction with feedback
+            if user_feedback:
+                st.write(f"사용자 피드백 반영: \"{user_feedback[:60]}{'...' if len(user_feedback) > 60 else ''}\"")
             st.write("Introduction 재작성 중...")
             introduction = orch.generate_introduction(
                 st.session_state.topic_analysis,
@@ -824,12 +1128,35 @@ def render_self_evolving_state():
                 writing_strategy=st.session_state.get("writing_strategy"),
                 evaluation_feedback=st.session_state.get("evaluation_result"),
                 unsupported_claims=claims,
+                user_feedback=user_feedback,
             )
-            # Validate citation range
+            # Validate citation range and renumber
             introduction = PipelineOrchestrator.validate_citation_range(
                 introduction, len(st.session_state.reference_pool)
             )
+            introduction, st.session_state.reference_pool = \
+                PipelineOrchestrator.renumber_citations(
+                    introduction, st.session_state.reference_pool
+                )
             st.session_state.introduction_text = introduction
+
+        # Record evolution details for history
+        st.session_state.setdefault("evolution_details", []).append({
+            "iteration": iteration,
+            "claims_found": len(claims),
+            "claims_list": claims[:5],
+            "completeness_gaps_found": len(comp_gaps),
+            "completeness_gaps_list": comp_gaps[:5],
+            "queries_used": queries,
+            "new_papers_found": len(new_papers),
+            "user_feedback": user_feedback,
+        })
+
+        # Clear cached claims/queries/feedback for next iteration
+        st.session_state.evolution_claims = []
+        st.session_state.evolution_completeness_gaps = []
+        st.session_state.evolution_queries = []
+        st.session_state.user_evolution_feedback = ""
 
         st.session_state.pipeline_iteration = iteration
         st.session_state.pipeline_state = "EVALUATING"
@@ -867,6 +1194,7 @@ def render_complete_state(reference_style: str = "APA"):
         st.markdown("### 버전 비교")
         tab_names = [h["label"] for h in history]
         tabs = st.tabs(tab_names)
+        evolution_details = st.session_state.get("evolution_details", [])
         for tab_idx, (tab, h) in enumerate(zip(tabs, history)):
             with tab:
                 eval_data = h.get("evaluation", {})
@@ -874,6 +1202,28 @@ def render_complete_state(reference_style: str = "APA"):
                 factual = eval_data.get("scores", {}).get("factual_accuracy", "?")
                 st.write(f"**종합 점수:** {overall}/10 | **Factual accuracy:** {factual}/10")
                 st.markdown(h["introduction"])
+
+                # Show evolution details for revision iterations
+                iter_num = h.get("iteration", 0)
+                matching_details = [
+                    d for d in evolution_details
+                    if d.get("iteration") == iter_num
+                ]
+                if matching_details:
+                    detail = matching_details[0]
+                    with st.expander("개선 상세 정보", expanded=False):
+                        st.write(f"**미지지 클레임:** {detail.get('claims_found', 0)}개")
+                        claims_list = detail.get("claims_list", [])
+                        if claims_list:
+                            for ci, cl in enumerate(claims_list, 1):
+                                st.write(f"  {ci}. {cl.get('claim', '')[:100]}")
+                        st.write(f"**보충 검색 쿼리:** {len(detail.get('queries_used', []))}개")
+                        for qi, q in enumerate(detail.get("queries_used", []), 1):
+                            st.write(f"  {qi}. `{q}`")
+                        st.write(f"**새로 발견된 논문:** {detail.get('new_papers_found', 0)}편")
+                        uf = detail.get("user_feedback", "")
+                        if uf:
+                            st.write(f"**사용자 피드백:** {uf}")
 
                 # Version selection button
                 is_current = (st.session_state.introduction_text == h["introduction"])
@@ -1133,7 +1483,14 @@ def run_fact_check(generation_result: dict):
 
     with st.spinner("팩트체크 진행 중..."):
         try:
-            fact_checker = FactChecker()
+            orch = get_orchestrator()
+            if orch:
+                fact_checker = FactChecker(
+                    llm_client=orch.llm_client,
+                    pubmed_client=orch.pubmed_client,
+                )
+            else:
+                fact_checker = FactChecker()
             check_result = fact_checker.verify_introduction(
                 generation_result.get("introduction", ""),
                 generation_result.get("articles_used", [])
@@ -1181,7 +1538,15 @@ def run_revision(
         status_text.write("Revision 프롬프트 생성 중...")
         progress_bar.progress(0.3)
 
-        llm_client = get_llm_client(api_key=api_key, model=model)
+        provider = st.session_state.get("provider_stored", "openai")
+        llm_client = get_llm_client(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            azure_endpoint=st.session_state.get("azure_endpoint_stored") or None,
+            api_version=st.session_state.get("azure_api_version_stored") or None,
+            base_model=st.session_state.get("azure_base_model_stored") or None,
+        )
         system_prompt, user_prompt = get_revision_prompt(
             current_intro, revision_request, articles_used
         )
@@ -1201,6 +1566,14 @@ def run_revision(
 
         from core.pipeline_orchestrator import _normalize_paragraph_breaks
         revised_intro = _normalize_paragraph_breaks(revised_intro)
+        revised_intro = PipelineOrchestrator.validate_citation_range(
+            revised_intro, len(st.session_state.get("reference_pool", []))
+        )
+        revised_intro, ref_pool = PipelineOrchestrator.renumber_citations(
+            revised_intro, st.session_state.get("reference_pool", [])
+        )
+        if ref_pool:
+            st.session_state.reference_pool = ref_pool
         st.session_state.introduction_text = revised_intro
         st.session_state.current_intro = revised_intro
         st.success("✅ 수정 완료!")
@@ -1209,7 +1582,14 @@ def run_revision(
         st.markdown(revised_intro)
 
         if st.button("수정 버전 팩트체크", key="revised_factcheck"):
-            fact_checker = FactChecker()
+            rev_orch = get_orchestrator()
+            if rev_orch:
+                fact_checker = FactChecker(
+                    llm_client=rev_orch.llm_client,
+                    pubmed_client=rev_orch.pubmed_client,
+                )
+            else:
+                fact_checker = FactChecker()
             check_result = fact_checker.verify_introduction(revised_intro, articles_used)
             accuracy = check_result.get("overall_accuracy", "UNKNOWN")
             st.metric("정확도", accuracy)
@@ -1310,6 +1690,8 @@ def main():
         render_generating_state()
     elif state == "EVALUATING":
         render_evaluating_state()
+    elif state == "CONFIRM_EVOLUTION":
+        render_confirm_evolution_state()
     elif state == "SELF_EVOLVING":
         render_self_evolving_state()
     elif state == "COMPLETE":

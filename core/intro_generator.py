@@ -327,6 +327,7 @@ class IntroductionGenerator:
         writing_strategy: dict = None,
         evaluation_feedback: dict = None,
         unsupported_claims: list = None,
+        user_feedback: str = "",
     ) -> str:
         """Step: Generate introduction text
 
@@ -338,6 +339,7 @@ class IntroductionGenerator:
             writing_strategy: Optional writing strategy with paragraph outline
             evaluation_feedback: Optional evaluation results from previous iteration
             unsupported_claims: Optional list of unsupported claims from previous iteration
+            user_feedback: Optional user-provided feedback for revision
 
         Returns:
             Generated introduction text
@@ -351,6 +353,7 @@ class IntroductionGenerator:
             writing_strategy=writing_strategy,
             evaluation_feedback=evaluation_feedback,
             unsupported_claims=unsupported_claims,
+            user_feedback=user_feedback,
         )
         return self.llm_client.generate(
             prompt=user_prompt,
@@ -421,13 +424,13 @@ class IntroductionGenerator:
 
         # Step 1.5: Review search queries
         yield ("confirmation", "Reviewing generated search strategies...")
-        search_queries = topic_analysis.get('search_queries', [])[:15]
+        search_queries = topic_analysis.get('search_queries', [])[:20]
         yield ("confirmation", f"Generated {len(search_queries)} search queries for comprehensive literature collection")
 
         # Step 2: Multi-strategy search
         yield ("searching", "Executing multi-strategy literature search...")
         paper_pool = self.deep_researcher.collect_papers_multistrategy(topic_analysis)
-        yield ("searching", f"Collected {len(paper_pool)} papers from {len(topic_analysis.get('search_queries', []))} search strategies")
+        yield ("searching", f"Collected {len(paper_pool)} papers from {len(search_queries)} search strategies")
 
         # Step 3: Landscape analysis
         yield ("analyzing", "Analyzing literature landscape...")

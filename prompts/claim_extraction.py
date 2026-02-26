@@ -21,13 +21,20 @@ Analyze the evaluation feedback and the introduction to identify specific claims
 2. Are stated as fact but have no citation
 3. Are overgeneralized beyond what the cited evidence shows
 
+IMPORTANT: Do NOT flag these as unsupported claims:
+- Well-known disease definitions and universally accepted facts
+- Logical transitions and narrative connectives
+- Study aims and rationale statements
+- Commonly cited prevalence/incidence figures that are general medical knowledge
+Only flag specific empirical claims that require evidence from the cited literature.
+
 Respond ONLY with valid JSON, no additional text or markdown formatting."""
 
     # Gather feedback from low-scoring criteria
     feedback_lines = []
     for criterion, fb in evaluation.get("feedback", {}).items():
         score = evaluation.get("scores", {}).get(criterion, 10)
-        if score < 7:
+        if score < 8:
             feedback_lines.append(f"- {criterion} (score {score}/10): {fb}")
 
     improvements_text = ""
@@ -202,5 +209,95 @@ REQUIREMENTS:
 - Use specific medical terminology
 - Include recent date filters where appropriate (e.g., 2018:2026[dp])
 - Keep queries focused but not so narrow they return zero results"""
+
+    return system_prompt, user_prompt
+
+
+def get_completeness_gap_prompt(
+    landscape: dict,
+    introduction: str,
+    evaluation: dict
+) -> tuple[str, str]:
+    """Get prompts for extracting completeness gaps by comparing introduction to landscape
+
+    Compares the introduction against key_findings and knowledge_gaps from the
+    landscape analysis to identify specific items that are missing or
+    inadequately covered.
+
+    Args:
+        landscape: Literature landscape analysis with key_findings, knowledge_gaps
+        introduction: The generated introduction text
+        evaluation: Self-evaluation result (used for completeness feedback)
+
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    system_prompt = """You are an expert at evaluating the completeness of medical research introductions.
+
+Your task is to compare an introduction against the known literature landscape (key findings and knowledge gaps) and identify specific items that are MISSING or inadequately covered.
+
+Focus on substantive gaps — items that would significantly improve the introduction if addressed. Do not flag minor wording differences.
+
+Respond ONLY with valid JSON, no additional text or markdown formatting."""
+
+    # Format key findings as numbered list
+    key_findings = landscape.get("key_findings", [])
+    findings_text = ""
+    if key_findings:
+        findings_lines = []
+        for i, f in enumerate(key_findings, 1):
+            findings_lines.append(f"  #{i}: {str(f)[:300]}")
+        findings_text = "\n".join(findings_lines)
+    else:
+        findings_text = "  (none)"
+
+    # Format knowledge gaps as numbered list
+    knowledge_gaps = landscape.get("knowledge_gaps", [])
+    gaps_text = ""
+    if knowledge_gaps:
+        gaps_lines = []
+        for i, g in enumerate(knowledge_gaps, 1):
+            gaps_lines.append(f"  #{i}: {str(g)[:300]}")
+        gaps_text = "\n".join(gaps_lines)
+    else:
+        gaps_text = "  (none)"
+
+    # Completeness feedback from evaluation
+    comp_feedback = evaluation.get("feedback", {}).get("completeness", "")
+    comp_score = evaluation.get("scores", {}).get("completeness", "N/A")
+
+    user_prompt = f"""Compare this introduction against the literature landscape and identify what is MISSING.
+
+LITERATURE LANDSCAPE — KEY FINDINGS ({len(key_findings)} total):
+{findings_text}
+
+LITERATURE LANDSCAPE — KNOWLEDGE GAPS ({len(knowledge_gaps)} total):
+{gaps_text}
+
+COMPLETENESS EVALUATION (score: {comp_score}/10):
+{comp_feedback[:500] if comp_feedback else '(no feedback available)'}
+
+INTRODUCTION TEXT:
+{introduction}
+
+Return JSON:
+{{
+    "completeness_gaps": [
+        {{
+            "source": "key_finding" or "knowledge_gap",
+            "item_number": N,
+            "item_text": "The text of the missing item from the landscape",
+            "gap_description": "How this item is missing or inadequately covered in the introduction",
+            "needed_evidence": "What type of evidence or content would fill this gap"
+        }},
+        ...
+    ]
+}}
+
+REQUIREMENTS:
+- Extract 2-6 completeness gaps (most important first)
+- Only flag items that are truly missing or very inadequately covered
+- For each gap, explain what specific content would need to be added
+- Prioritize gaps that would most improve the introduction's coverage of the field"""
 
     return system_prompt, user_prompt
