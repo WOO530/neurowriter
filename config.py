@@ -26,8 +26,8 @@ DB_PATH = os.getenv("DB_PATH", "neurowriter_cache.db")
 # Application Configuration
 APP_TITLE = "NeuroWriter"
 APP_DESCRIPTION = "EEG/Deep Learning 의학논문 Introduction Generator"
-MAX_INTRO_LENGTH = 650  # words
-MIN_INTRO_LENGTH = 400  # words
+MAX_INTRO_LENGTH = 600  # words
+MIN_INTRO_LENGTH = 450  # words
 REFERENCE_VANCOUVER_FORMAT = True
 
 # Logging

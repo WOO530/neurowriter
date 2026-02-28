@@ -17,7 +17,7 @@ AI 기반 의학 논문 Introduction 자동 생성 에이전트.
   → 15+ 검색 쿼리 생성 & PubMed Deep Research (deep_researcher)
   → 100-200편 수집 → 30-50편 선별 (citation_scorer)
   → Introduction 생성 (intro_generator, GPT-4o)
-  → 8개 기준 루브릭 자체 평가 (self_evaluator)
+  → 10개 기준 루브릭 자체 평가 (self_evaluator)
   → 팩트체크 & 수정 (fact_checker, revision)
 ```
 

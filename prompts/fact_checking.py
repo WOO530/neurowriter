@@ -114,12 +114,20 @@ def get_claim_citation_mapping_prompt(
     """
     system_prompt = """You are an expert at verifying claim-citation mappings in medical research papers.
 
-For each factual claim in the introduction that has a citation, you must verify whether the cited article's abstract actually supports that specific claim.
+For each factual claim in the introduction that has a citation, classify the claim-citation relationship using a THREE-TIER system:
 
-Pay special attention to:
-- Numerical claims (prevalence, percentages, sample sizes) — check if the numbers match the abstract
-- Directional claims (increased/decreased/improved) — check if the direction matches
-- Specific findings attributed to a study — check if the abstract reports those findings
+1. **SUPPORTED** (is_supported=true, support_level="direct"): The abstract explicitly states or directly supports the claim. Numbers match, directions match, findings are clearly reported.
+
+2. **REASONABLE** (is_supported=true, support_level="reasonable"): The claim is a reasonable inference, paraphrase, or synthesis consistent with the abstract. This includes:
+   - Paraphrasing findings in different words while preserving meaning
+   - Synthesizing across multiple cited papers into a unified claim
+   - Drawing reasonable inferences from reported data (e.g., if a study reports "accuracy 85-92%", citing "high accuracy" is reasonable)
+   - Using approximate language for specific numbers ("approximately 30%" when abstract says "29.3%")
+   - Abstracts are truncated — if the claim is consistent with the abstract's topic and direction, give benefit of the doubt
+
+3. **UNSUPPORTED** (is_supported=false, support_level="unsupported"): The abstract CONTRADICTS the claim, OR the paper is about a completely different topic, OR the claim attributes specific findings that the abstract explicitly does NOT report.
+
+KEY PRINCIPLE: is_supported=false means "the abstract CONTRADICTS or is IRRELEVANT to the claim", NOT "the abstract doesn't explicitly mention every detail."
 
 Respond ONLY with valid JSON, no additional text or markdown formatting."""
 
@@ -140,7 +148,8 @@ Return JSON:
             "claim": "The exact claim text from the introduction",
             "citation_numbers": [1, 2],
             "is_supported": true,
-            "issue": "null if supported, otherwise describe the mismatch"
+            "support_level": "direct|reasonable|unsupported",
+            "issue": "null if supported, otherwise describe the specific contradiction or irrelevance"
         }},
         ...
     ],
@@ -159,9 +168,14 @@ Return JSON:
 REQUIREMENTS:
 - Extract EVERY factual claim that has a citation [N]
 - For each claim, check ALL cited articles
-- Mark is_supported=false if the abstract does not contain evidence for the claim
+- Use the THREE-TIER classification:
+  * "direct": abstract explicitly states the claim
+  * "reasonable": claim is a fair paraphrase, synthesis, or inference consistent with the abstract
+  * "unsupported": abstract CONTRADICTS the claim or is about a completely different topic
+- Mark is_supported=false ONLY when the abstract contradicts the claim or is entirely irrelevant — NOT when the abstract merely lacks explicit detail
+- For multi-paper citations [1-3], the COMBINED evidence across all cited papers should support the synthesized claim
 - Numerical mismatches should be listed separately with severity
-- minor: rounding differences or approximate vs exact values
+- minor: rounding differences, approximate vs exact values, or reasonable ranges
 - major: completely different numbers or contradictory findings"""
 
     return system_prompt, user_prompt

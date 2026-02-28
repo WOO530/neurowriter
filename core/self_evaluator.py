@@ -1,6 +1,7 @@
 """Self-evaluation module for generated introductions"""
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 from core.llm_client import LLMClient, get_llm_client
 from prompts.self_evaluation import get_evaluation_prompt
@@ -44,6 +45,14 @@ class SelfEvaluator:
         "factual_accuracy": {
             "description": "Accuracy of claims and citations",
             "prompt_hint": "Do cited references actually support the claims?"
+        },
+        "originality": {
+            "description": "Originality of phrasing vs source abstracts (plagiarism risk)",
+            "prompt_hint": "Does the text contain phrases copied from abstracts, or genuinely paraphrased?"
+        },
+        "ai_detectability": {
+            "description": "Authenticity of writing style vs generic AI output",
+            "prompt_hint": "Does this read like expert academic writing or generic AI text?"
         }
     }
 
@@ -78,7 +87,7 @@ class SelfEvaluator:
             - overall_score: Average score
             - passed: Boolean (all scores >= 7) or False
         """
-        logger.info("Evaluating introduction across 8 criteria...")
+        logger.info("Evaluating introduction across 10 criteria...")
 
         evaluation_results = {
             "scores": {},
@@ -87,35 +96,38 @@ class SelfEvaluator:
             "criterion_details": {}
         }
 
-        # Evaluate each criterion
-        for criterion_key, criterion_info in self.EVALUATION_CRITERIA.items():
-            try:
-                logger.debug(f"  Evaluating: {criterion_key}")
+        # Evaluate all criteria in parallel (each is an independent LLM call)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(
+                    self._evaluate_criterion,
+                    criterion_key, introduction, reference_pool,
+                    topic_analysis, landscape, criterion_info
+                ): criterion_key
+                for criterion_key, criterion_info in self.EVALUATION_CRITERIA.items()
+            }
 
-                score, feedback, improvement = self._evaluate_criterion(
-                    criterion_key,
-                    introduction,
-                    reference_pool,
-                    topic_analysis,
-                    landscape,
-                    criterion_info
-                )
+            for future in as_completed(futures):
+                criterion_key = futures[future]
+                criterion_info = self.EVALUATION_CRITERIA[criterion_key]
+                try:
+                    score, feedback, improvement = future.result()
 
-                evaluation_results["scores"][criterion_key] = score
-                evaluation_results["feedback"][criterion_key] = feedback
-                evaluation_results["criterion_details"][criterion_key] = criterion_info
+                    evaluation_results["scores"][criterion_key] = score
+                    evaluation_results["feedback"][criterion_key] = feedback
+                    evaluation_results["criterion_details"][criterion_key] = criterion_info
 
-                if improvement:
-                    evaluation_results["improvements"].append({
-                        "criterion": criterion_key,
-                        "score": score,
-                        "improvement": improvement
-                    })
+                    if improvement:
+                        evaluation_results["improvements"].append({
+                            "criterion": criterion_key,
+                            "score": score,
+                            "improvement": improvement
+                        })
 
-            except Exception as e:
-                logger.error(f"Error evaluating {criterion_key}: {e}")
-                evaluation_results["scores"][criterion_key] = 5  # Default neutral score
-                evaluation_results["feedback"][criterion_key] = f"Error: {str(e)}"
+                except Exception as e:
+                    logger.error(f"Error evaluating {criterion_key}: {e}")
+                    evaluation_results["scores"][criterion_key] = 5  # Default neutral score
+                    evaluation_results["feedback"][criterion_key] = f"Error: {str(e)}"
 
         # Calculate overall score
         scores = list(evaluation_results["scores"].values())

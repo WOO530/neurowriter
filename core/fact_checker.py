@@ -2,6 +2,7 @@
 import json
 import re
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from core.llm_client import LLMClient, get_llm_client
 from core.pubmed_client import PubmedClient
@@ -61,25 +62,20 @@ class FactChecker:
             "summary": ""
         }
 
-        # Check 1: Verify all PMIDs exist
-        logger.info("Checking 1/3: Verifying PMID existence...")
-        pmid_verification = self._verify_pmids(articles_used)
-        results["pmid_verification"] = pmid_verification
+        # Check 2: Citation verification (CPU-only, instant)
+        logger.info("Checking 1/4: Verifying citation numbers...")
+        results["citation_verification"] = self._verify_citations(introduction, articles_used)
 
-        # Check 2: Extract citations and verify they match articles
-        logger.info("Checking 2/4: Verifying citation numbers...")
-        citation_check = self._verify_citations(introduction, articles_used)
-        results["citation_verification"] = citation_check
+        # Checks 1, 3, 4 in parallel (all independent: HTTP, LLM, LLM)
+        logger.info("Checking 2-4/4: PMID verification + claim mapping + LLM check (parallel)...")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            f_pmid = executor.submit(self._verify_pmids, articles_used)
+            f_claim = executor.submit(self._verify_claim_citation_mapping, introduction, articles_used)
+            f_llm = executor.submit(self._llm_fact_check, introduction, articles_used)
 
-        # Check 3: Claim-citation mapping verification
-        logger.info("Checking 3/4: Verifying claim-citation mappings...")
-        claim_mapping = self._verify_claim_citation_mapping(introduction, articles_used)
-        results["claim_mapping"] = claim_mapping
-
-        # Check 4: LLM-based relevance and accuracy check
-        logger.info("Checking 4/4: LLM-based accuracy verification...")
-        llm_check = self._llm_fact_check(introduction, articles_used)
-        results["llm_verification"] = llm_check
+            results["pmid_verification"] = f_pmid.result()
+            results["claim_mapping"] = f_claim.result()
+            results["llm_verification"] = f_llm.result()
 
         # Compile overall assessment
         results = self._compile_assessment(results)
@@ -89,7 +85,9 @@ class FactChecker:
         return results
 
     def _verify_pmids(self, articles: List[Dict]) -> List[Dict]:
-        """Verify that all PMIDs exist in PubMed
+        """Verify that all PMIDs exist in PubMed using batch efetch
+
+        Sends all PMIDs in a single batch request instead of one-by-one.
 
         Args:
             articles: List of articles with PMIDs
@@ -99,6 +97,8 @@ class FactChecker:
         """
         verification_results = []
 
+        # Separate articles with and without PMIDs
+        articles_with_pmids = []
         for article in articles:
             pmid = article.get("pmid", "")
             if not pmid:
@@ -107,36 +107,56 @@ class FactChecker:
                     "verified": False,
                     "reason": "No PMID provided"
                 })
-                continue
+            else:
+                articles_with_pmids.append(article)
 
-            try:
-                # Try to fetch the PMID from PubMed
-                response = requests.get(
-                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                    params={
-                        "db": "pubmed",
-                        "id": pmid,
-                        "rettype": "json"
-                    },
-                    timeout=5
-                )
+        if not articles_with_pmids:
+            return verification_results
 
-                verified = response.status_code == 200
+        # Batch verify: send all PMIDs in one request
+        all_pmids = [a.get("pmid", "") for a in articles_with_pmids]
+        verified_pmids = set()
 
+        try:
+            # Use efetch with comma-separated PMIDs
+            batch_ids = ",".join(all_pmids)
+            response = requests.get(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                params={
+                    "db": "pubmed",
+                    "id": batch_ids,
+                    "rettype": "xml",
+                },
+                timeout=15
+            )
+            if response.status_code == 200:
+                # Extract PMIDs that appear in the response XML
+                import re as _re
+                for m in _re.finditer(r'<PMID[^>]*>(\d+)</PMID>', response.text):
+                    verified_pmids.add(m.group(1))
+
+        except Exception as e:
+            logger.warning(f"Error in batch PMID verification: {e}")
+            # On batch failure, mark all as unknown
+            for article in articles_with_pmids:
                 verification_results.append({
-                    "pmid": pmid,
-                    "verified": verified,
-                    "title": article.get("title", ""),
-                    "reason": "Found in PubMed" if verified else "Not found"
-                })
-
-            except Exception as e:
-                logger.warning(f"Error verifying PMID {pmid}: {e}")
-                verification_results.append({
-                    "pmid": pmid,
+                    "pmid": article.get("pmid", ""),
                     "verified": None,
+                    "title": article.get("title", ""),
                     "reason": f"Verification error: {str(e)}"
                 })
+            return verification_results
+
+        # Build results from batch response
+        for article in articles_with_pmids:
+            pmid = article.get("pmid", "")
+            verified = pmid in verified_pmids
+            verification_results.append({
+                "pmid": pmid,
+                "verified": verified,
+                "title": article.get("title", ""),
+                "reason": "Found in PubMed" if verified else "Not found"
+            })
 
         return verification_results
 
@@ -268,9 +288,14 @@ class FactChecker:
                 reasoning_effort="medium",
             )
 
-            # Parse JSON response
+            # Parse JSON response (strip markdown code fences if present)
             try:
-                result = json.loads(response)
+                clean = response.strip()
+                if clean.startswith("```"):
+                    lines = clean.split("\n")
+                    json_lines = [l for l in lines if not l.startswith("```")]
+                    clean = "\n".join(json_lines).strip()
+                result = json.loads(clean)
                 return result
             except json.JSONDecodeError:
                 logger.warning("Could not parse LLM fact-check response as JSON")

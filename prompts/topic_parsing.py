@@ -28,7 +28,21 @@ SEARCH QUERY STRATEGY:
 - Vary breadth: 2-4 broad queries (2-4 terms), 5-10 moderate queries (4-6 terms), 2-4 narrow queries (6-8 terms)
 - Include at least 2 review/meta-analysis queries with explicit Boolean structure
 - Combine terms from different angles: epidemiology, mechanism, biomarker, methodology, clinical outcome
-- Avoid repeating the same structure — each query should target a distinct literature segment"""
+- Avoid repeating the same structure — each query should target a distinct literature segment
+- IMPORTANT: Include queries for BOTH modern computational approaches AND classical/traditional
+  research methods. For example, if the topic involves EEG biomarkers, generate queries for
+  established neurophysiological markers (e.g., spectral power analyses, ERP components,
+  connectivity metrics) studied with classical statistical methods, not just ML/DL approaches.
+- At least 3-4 queries should target foundational/classical literature that modern approaches
+  build upon.
+- Adapt query terminology to the research methodology identified in the topic.
+
+AMBIGUITY DETECTION:
+- Identify aspects of the research topic that could have multiple valid interpretations
+- Common ambiguities: recording condition (baseline resting-state vs task-state vs peri-ictal), patient population (treatment-naive vs treatment-resistant vs mixed), outcome definition (response vs remission vs relapse), data preprocessing approach
+- For each ambiguity, provide 2-5 concrete options and a reasonable default
+- Only flag aspects where a wrong assumption would significantly change the search strategy or introduction scope
+- If the topic is specific enough that no major ambiguities exist, return an empty list"""
 
     # Use EEG examples as default for mixed modality
     query_key = modality if modality in QUERY_EXAMPLES else "eeg"
@@ -71,6 +85,16 @@ Return a JSON object with EXACTLY this structure (all fields required):
 
 {query_examples},
 
+    "potential_ambiguities": [
+        {{
+            "aspect": "Short label for the ambiguous aspect (e.g., 'EEG recording context')",
+            "question": "Clear question for the user (e.g., 'Which EEG recording condition is the focus?')",
+            "options": ["Option 1", "Option 2", "Option 3"],
+            "default": "The most reasonable default option",
+            "reasoning": "Why this aspect is ambiguous and why it matters for the search"
+        }}
+    ],
+
     "expected_discovery_areas": {{
         "landmark_findings": "What are the seminal/foundational studies you hope to find?",
         "ongoing_debates": "What are the controversies or knowledge gaps in this area?",
@@ -81,9 +105,106 @@ Return a JSON object with EXACTLY this structure (all fields required):
 
 REQUIREMENTS:
 - concept_hierarchy: Must have AT LEAST 5 levels, from very broad to ultra-specific
-- search_queries: Generate 10-20 DISTINCT queries. Default to ~15 for most topics; use fewer (10-12) for well-studied topics, more (15-20) for niche or cross-disciplinary topics
+- search_queries: Generate 12-25 DISTINCT queries. Adjust count based on topic breadth: narrow well-studied topics: 12-15, standard topics: 15-20, broad or cross-disciplinary topics: 20-25. Ensure a balanced mix of: foundational/classical approaches (at least 3-4), modern computational methods, clinical/epidemiological context, and review queries. The ratio of classical to modern queries should reflect the topic — if the methodology itself is classical, most queries should target classical literature.
 - key_concepts: At least 12 concepts that a comprehensive introduction should address
-- knowledge_areas_to_research: At least 8 major areas to cover"""
+- knowledge_areas_to_research: At least 8 major areas to cover
+- potential_ambiguities: 0-3 items. Return an empty list if the topic is specific enough"""
+
+    return system_prompt, user_prompt
+
+
+def get_query_regeneration_prompt(
+    topic_analysis: dict,
+    resolutions: dict,
+    existing_queries: list,
+) -> tuple[str, str]:
+    """Get prompts for regenerating search queries after disambiguation
+
+    Takes the existing topic analysis, resolved ambiguities, and current
+    queries, and produces a new set of queries that reflects the user's
+    clarifications.
+
+    Args:
+        topic_analysis: Parsed topic analysis dict
+        resolutions: Dict mapping aspect -> {"choice": str, "note": str}
+        existing_queries: Current list of search query strings
+
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    system_prompt = """You are an expert medical researcher specializing in PubMed literature search.
+
+Your task is to REGENERATE search queries based on clarified research intent.
+The user has resolved ambiguities about their research topic. Update the search
+queries to reflect their specific intent.
+
+SEARCH QUERY RULES:
+- Output raw PubMed queries only — no labels, prefixes, or descriptions
+- Use Boolean operators explicitly: (term1 OR term2) AND (term3 OR term4)
+- Include OR for synonyms and abbreviations in EVERY query
+- Keep queries 4-8 terms long (excluding Boolean operators)
+- Vary breadth: broad, moderate, and narrow queries
+- Include at least 2 review/meta-analysis queries
+- IMPORTANT: Include queries for BOTH modern computational approaches AND classical/traditional
+  research methods. At least 3-4 queries should target foundational/classical literature.
+- Adapt query terminology to the research methodology identified in the topic.
+
+REGENERATION STRATEGY:
+- KEEP queries that are unrelated to the resolved ambiguities (they are still valid)
+- MODIFY queries where the ambiguity resolution changes the search terms
+- ADD new queries that specifically target the clarified research focus
+- REMOVE queries that no longer apply given the resolution
+
+Respond ONLY with valid JSON, no additional text or markdown formatting."""
+
+    # Format resolved ambiguities
+    resolution_lines = []
+    for aspect, res in resolutions.items():
+        if isinstance(res, dict):
+            line = f"- {aspect}: {res.get('choice', '')}"
+            note = res.get("note", "")
+            if note:
+                line += f" (additional context: {note})"
+        else:
+            line = f"- {aspect}: {res}"
+        resolution_lines.append(line)
+    resolution_text = "\n".join(resolution_lines)
+
+    existing_queries_text = "\n".join(f"  {i}. {q}" for i, q in enumerate(existing_queries, 1))
+
+    disease = topic_analysis.get("disease", "")
+    data_type = topic_analysis.get("data_type", "")
+    methodology = topic_analysis.get("methodology", "")
+    outcome = topic_analysis.get("outcome", "")
+
+    user_prompt = f"""Regenerate search queries for this research topic after the user clarified ambiguities.
+
+RESEARCH TOPIC:
+- Disease: {disease}
+- Data type: {data_type}
+- Methodology: {methodology}
+- Outcome: {outcome}
+
+RESOLVED AMBIGUITIES (the user has clarified these aspects):
+{resolution_text}
+
+CURRENT QUERIES (for reference — keep unaffected ones, modify or replace affected ones):
+{existing_queries_text}
+
+Return JSON:
+{{
+    "search_queries": [
+        "query 1",
+        "query 2",
+        "... 12-25 queries total ..."
+    ]
+}}
+
+REQUIREMENTS:
+- Generate 12-25 DISTINCT queries reflecting the resolved ambiguities
+- Queries affected by the disambiguation should be updated to match the user's intent
+- Queries unrelated to the disambiguation should be preserved or kept similar
+- Ensure balanced coverage: foundational/classical approaches, modern methods, clinical context, reviews"""
 
     return system_prompt, user_prompt
 

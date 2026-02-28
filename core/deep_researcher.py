@@ -1,6 +1,7 @@
 """Deep research pipeline for comprehensive literature analysis"""
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 from core.pubmed_client import PubmedClient
 from core.topic_parser import TopicParser
@@ -30,10 +31,15 @@ _CATEGORY_PATTERNS: Dict[str, List[str]] = {
         "periodic limb movement", "sleep efficiency", "sleep latency",
         "oxygen desaturation", "ahi",
     ],
-    "methodology_ml": [
+    "methodology": [
+        # ML/DL
         "deep learning", "machine learning", "neural network", "cnn",
         "convolutional", "recurrent", "lstm", "transformer", "classification",
         "prediction model", "feature extraction", "automated",
+        # Classical statistics
+        "regression analysis", "logistic regression", "cox regression",
+        "survival analysis", "multivariate analysis", "statistical model",
+        "random forest", "support vector", "gradient boosting",
     ],
     "reviews": [
         "systematic review", "meta-analysis", "meta-analytic", "scoping review",
@@ -107,10 +113,34 @@ class DeepResearcher:
             "reference_pool": reference_pool
         }
 
+    def _search_one_query(self, query: str, index: int, total: int) -> List[Dict]:
+        """Thread-safe single query search
+
+        Args:
+            query: PubMed search query
+            index: Query index (1-based)
+            total: Total number of queries
+
+        Returns:
+            List of valid papers from this query
+        """
+        logger.info(f"  Query {index}/{total}: {query[:50]}...")
+        papers = self.pubmed_client.search_and_fetch(query, f"query_{index}", max_results=30)
+        valid = []
+        for paper in papers:
+            pmid = paper.get("pmid")
+            if pmid and has_valid_abstract(paper):
+                if paper.get("is_retracted", False):
+                    logger.warning(f"    Skipping retracted paper: PMID {pmid}")
+                    continue
+                valid.append(paper)
+        return valid
+
     def collect_papers_multistrategy(self, topic_analysis: Dict) -> List[Dict]:
-        """Collect papers using multiple search strategies
+        """Collect papers using multiple search strategies with parallel execution
 
         Papers without a valid abstract (>=100 chars) are excluded.
+        Uses ThreadPoolExecutor with max_workers=3 to respect PubMed rate limits.
 
         Args:
             topic_analysis: Topic analysis with search queries
@@ -121,45 +151,37 @@ class DeepResearcher:
         all_papers = {}  # Use dict to deduplicate by PMID
         search_queries = topic_analysis.get("search_queries", [])
 
-        logger.info(f"Executing {len(search_queries)} search queries...")
+        logger.info(f"Executing {len(search_queries)} search queries (parallel, workers=3)...")
 
-        for i, query in enumerate(search_queries, 1):
-            try:
-                logger.info(f"  Query {i}/{len(search_queries)}: {query[:50]}...")
+        # Run search queries in parallel (3 concurrent to respect PubMed rate limits)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            # Submit all search queries
+            futures = {
+                executor.submit(
+                    self._search_one_query, query, i, len(search_queries)
+                ): i
+                for i, query in enumerate(search_queries, 1)
+            }
 
-                # Search strategy 1: General search
-                papers = self.pubmed_client.search_and_fetch(query, f"query_{i}", max_results=30)
-
-                for paper in papers:
-                    pmid = paper.get("pmid")
-                    if pmid and pmid not in all_papers and has_valid_abstract(paper):
-                        if paper.get("is_retracted", False):
-                            logger.warning(f"    Skipping retracted paper: PMID {pmid}")
-                            continue
-                        all_papers[pmid] = paper
-
-                logger.debug(f"    Found {len(papers)} papers, total unique: {len(all_papers)}")
-
-            except Exception as e:
-                logger.warning(f"  Error in query {i}: {e}")
-
-        # Strategy: High-impact journal filter
-        try:
-            logger.info("  Adding high-impact journal search...")
-            high_impact = self.pubmed_client.search_and_fetch(
-                f"({topic_analysis.get('disease', '')}) AND (Nature[Journal] OR NEJM[Journal] OR Lancet[Journal] OR JAMA[Journal])",
-                "high_impact",
-                max_results=40
+            # Also submit the high-impact journal search
+            hi_query = f"({topic_analysis.get('disease', '')}) AND (Nature[Journal] OR NEJM[Journal] OR Lancet[Journal] OR JAMA[Journal])"
+            hi_future = executor.submit(
+                self._search_one_query, hi_query, len(search_queries) + 1,
+                len(search_queries) + 1
             )
-            for paper in high_impact:
-                pmid = paper.get("pmid")
-                if pmid and pmid not in all_papers and has_valid_abstract(paper):
-                    if paper.get("is_retracted", False):
-                        logger.warning(f"    Skipping retracted paper: PMID {pmid}")
-                        continue
-                    all_papers[pmid] = paper
-        except Exception as e:
-            logger.warning(f"Error in high-impact search: {e}")
+            futures[hi_future] = "high_impact"
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    papers = future.result()
+                    for paper in papers:
+                        pmid = paper.get("pmid")
+                        if pmid and pmid not in all_papers:
+                            all_papers[pmid] = paper
+                    logger.debug(f"    Query {idx} done, total unique: {len(all_papers)}")
+                except Exception as e:
+                    logger.warning(f"  Error in query {idx}: {e}")
 
         paper_list = list(all_papers.values())
         logger.info(f"Total unique papers collected: {len(paper_list)}")
@@ -204,7 +226,7 @@ class DeepResearcher:
         """Categorise papers into predefined groups using keyword matching
 
         Categories: epidemiology, clinical_treatment, biomarkers,
-                    methodology_ml, reviews, other
+                    methodology, reviews, other
 
         Args:
             papers: List of article dicts
@@ -363,7 +385,7 @@ class DeepResearcher:
         existing_pool: List[Dict],
         max_per_query: int = 20
     ) -> List[Dict]:
-        """Run targeted PubMed searches for unsupported claims
+        """Run targeted PubMed searches for unsupported claims (parallel)
 
         Args:
             queries: Targeted search queries for unsupported claims
@@ -376,21 +398,36 @@ class DeepResearcher:
         existing_pmids = {p.get("pmid") for p in existing_pool if p.get("pmid")}
         new_papers: Dict[str, Dict] = {}
 
-        for i, query in enumerate(queries, 1):
-            try:
-                logger.info(f"  Supplementary query {i}/{len(queries)}: {query[:60]}...")
-                papers = self.pubmed_client.search_and_fetch(
-                    query, f"supplementary_{i}", max_results=max_per_query
-                )
-                for paper in papers:
-                    pmid = paper.get("pmid")
-                    if pmid and pmid not in existing_pmids and pmid not in new_papers and has_valid_abstract(paper):
-                        if paper.get("is_retracted", False):
-                            logger.warning(f"    Skipping retracted paper: PMID {pmid}")
-                            continue
-                        new_papers[pmid] = paper
-            except Exception as e:
-                logger.warning(f"  Error in supplementary query {i}: {e}")
+        def _search_one(i: int, query: str) -> List[Dict]:
+            logger.info(f"  Supplementary query {i}/{len(queries)}: {query[:60]}...")
+            papers = self.pubmed_client.search_and_fetch(
+                query, f"supplementary_{i}", max_results=max_per_query
+            )
+            valid = []
+            for paper in papers:
+                pmid = paper.get("pmid")
+                if pmid and has_valid_abstract(paper):
+                    if paper.get("is_retracted", False):
+                        logger.warning(f"    Skipping retracted paper: PMID {pmid}")
+                        continue
+                    valid.append(paper)
+            return valid
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(_search_one, i, query): i
+                for i, query in enumerate(queries, 1)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    papers = future.result()
+                    for paper in papers:
+                        pmid = paper.get("pmid")
+                        if pmid and pmid not in existing_pmids and pmid not in new_papers:
+                            new_papers[pmid] = paper
+                except Exception as e:
+                    logger.warning(f"  Error in supplementary query {idx}: {e}")
 
         result = list(new_papers.values())
         logger.info(f"Supplementary search found {len(result)} new papers from {len(queries)} queries")

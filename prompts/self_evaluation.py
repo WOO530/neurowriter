@@ -22,20 +22,23 @@ def get_evaluation_prompt(
     Returns:
         Tuple of (system_prompt, user_prompt)
     """
-    system_prompt = """You are a STRICT expert evaluator of medical research writing.
+    system_prompt = """You are an expert evaluator of medical research writing.
 Evaluate the provided introduction against a SPECIFIC criterion, giving:
 1. A numerical score (0-10, where 10 is perfect)
 2. Detailed feedback explaining the score
 3. If score < 8: a specific suggestion for improvement
 
 CALIBRATION ANCHORS — use these to calibrate your scoring:
-- 10: Ready for Nature Medicine / NEJM without any revision
-- 8-9: Strong draft that needs only minor polishing
-- 6-7: Typical first-draft quality with clear areas for improvement
+- 10: Publication-ready for Nature Medicine / NEJM
+- 8-9: Strong writing with only minor issues; meets the standard for a well-crafted draft
+- 6-7: Adequate but with clear areas for improvement
 - 4-5: Below average — multiple significant issues
 - 0-3: Fundamentally flawed
 
-IMPORTANT: Most AI-generated first drafts score 5-7. Score LOW rather than HIGH when uncertain. A score of 8+ should be reserved for genuinely excellent writing that would impress a senior researcher.
+SCORING PRINCIPLES:
+- Judge the writing on its actual merits. A well-revised draft CAN score 8-9.
+- Award high scores when the criterion is genuinely met, regardless of whether the text was AI-assisted.
+- Focus on substance: does the text achieve what the criterion asks for?
 
 Respond ONLY as JSON with this structure:
 {
@@ -45,7 +48,7 @@ Respond ONLY as JSON with this structure:
 }"""
 
     # Criteria that benefit from abstract context for accurate evaluation
-    ABSTRACT_CRITERIA = {"factual_accuracy", "depth", "reference_quality"}
+    ABSTRACT_CRITERIA = {"factual_accuracy", "depth", "reference_quality", "originality"}
     use_abstracts = criterion in ABSTRACT_CRITERIA
     refs_summary = _format_references_summary(
         reference_pool,
@@ -124,11 +127,12 @@ def _get_criterion_guidelines(criterion: str, topic_analysis: dict, landscape: d
 - Score 0-2: Entirely generic; could apply to any study in this field""",
 
         "reference_density": """For REFERENCE DENSITY (citations portfolio and distribution):
-- Score 9-10: Total 15-25 unique references cited in text, ≤20% sentences without citations, multiple citations where appropriate
-- Score 7-8: Total 10-15 unique references cited, ≤30% sentences without citations
-- Score 5-6: Total 5-10 references cited, ≤50% sentences without citations
-- Score 3-4: Total 3-5 references OR >50% sentences without citations
-- Score 0-2: Total <3 references OR >70% sentences without citations
+- Score 9-10: Total 10-20 unique references cited in text, 50-70% of sentences have citations, multiple citations grouped where appropriate [N-M]
+- Score 7-8: Total 8-15 unique references cited, 40-60% of sentences have citations
+- Score 5-6: Total 5-8 references cited, <40% of sentences have citations
+- Score 3-4: Total 3-5 references OR <25% of sentences have citations
+- Score 0-2: Total <3 references OR citations nearly absent
+NOTE: Not every sentence needs a citation. Common knowledge, transitions, and study aims are appropriately uncited. 30-50% uncited sentences is NORMAL for good academic writing.
 Quality check: Count ACTUALLY CITED references in the text (not just available pool size). When citing multiple studies for same claim, verify most impactful/high-tier journals are selected""",
 
         "reference_quality": """For REFERENCE QUALITY (landmark papers, high-impact):
@@ -153,13 +157,16 @@ Quality check: Count ACTUALLY CITED references in the text (not just available p
 - Score 0-2: No logical structure; reads like a list of disconnected facts""",
 
         "depth": """For DEPTH (substantive detail, avoiding superficiality):
-- Score 9-10: Each claim has supporting evidence/detail. Nuanced discussion of mechanisms, effect sizes, or methodological considerations
+- Score 9-10: Key claims have supporting evidence/detail. Includes nuanced discussion of mechanisms, effect sizes, or methodological considerations where space permits
 - Score 7-8: Good detail overall but 2-3 claims are stated without supporting evidence or specifics
 - Score 5-6: Mix of detailed and superficial content; many claims are surface-level summaries
 - Score 3-4: Mostly superficial; reads like an abstract rather than an introduction
-- Score 0-2: No substantive detail; entirely unsupported generalizations""",
+- Score 0-2: No substantive detail; entirely unsupported generalizations
+NOTE: Within a 500-600 word introduction (3-5 paragraphs), it is not feasible to provide granular detail for EVERY claim. Evaluate whether the MOST IMPORTANT claims have adequate depth, not whether every minor point is fully elaborated.""",
 
         "completeness": f"""For COMPLETENESS (covers key concepts from landscape):
+
+WORD LIMIT CONTEXT: The introduction is limited to 500-600 words (3-5 paragraphs). It is physically impossible to address ALL items below in detail. Evaluate based on PRIORITIZED coverage.
 
 KEY FINDINGS that should be mentioned ({len(landscape.get('key_findings', []))} total):
 {_format_checklist_items(landscape.get('key_findings', []), max_items=10, max_chars=300)}
@@ -167,8 +174,10 @@ KEY FINDINGS that should be mentioned ({len(landscape.get('key_findings', []))} 
 KNOWLEDGE GAPS that should be addressed ({len(landscape.get('knowledge_gaps', []))} total):
 {_format_checklist_items(landscape.get('knowledge_gaps', []), max_items=10, max_chars=300)}
 
-- Score 9-10: Addresses all/nearly all key findings and gaps listed above; clear research rationale emerges
-- Score 7-8: Covers most key areas but misses 1-2 important findings or gaps
+PRIORITIZATION GUIDE: Items directly related to the study's methodology, intervention, or clinical rationale should be covered first. Background epidemiology and tangential findings are lower priority.
+
+- Score 9-10: Addresses the 5-7 most important key findings and 3-4 most relevant knowledge gaps; clear research rationale emerges. Related items synthesized together count as covered.
+- Score 7-8: Covers most high-priority areas but misses 1-2 important findings or gaps directly relevant to the study rationale
 - Score 5-6: Covers about half of key areas; several important themes absent
 - Score 3-4: Misses multiple major areas; incomplete picture of the field
 - Score 0-2: Covers only a narrow slice; most key areas absent
@@ -176,16 +185,46 @@ KNOWLEDGE GAPS that should be addressed ({len(landscape.get('knowledge_gaps', []
 In your feedback, LIST which specific items above are MISSING from the introduction by their number (e.g., "Missing key finding #3, #7 and knowledge gap #2, #4"). Be specific about WHAT is missing, not just HOW MANY items are missing.""",
 
         "factual_accuracy": """For FACTUAL ACCURACY (claims match cited references):
-- Score 9-10: All claims accurately reflect cited papers with correct specifics (sample sizes, effect sizes, conclusions)
-- Score 7-8: Minor inaccuracies (1-2) such as slightly imprecise paraphrasing, but no clear misrepresentations
-- Score 5-6: Several claims (3-5) that cannot be verified from the provided abstracts, OR 1-2 clear misrepresentations of cited sources. Overgeneralizations from single studies count as inaccuracies
+- Score 9-10: All claims accurately reflect cited papers. Specific numbers match sources. No misrepresentations
+- Score 7-8: Minor inaccuracies (1-2) such as slightly imprecise paraphrasing, but no clear misrepresentations. Synthesized claims (grouping multiple studies) are acceptable if the synthesis is fair
+- Score 5-6: Several claims (3-5) that clearly misrepresent cited sources, OR 2+ fabricated specifics
 - Score 3-4: Multiple clear misrepresentations or fabricated specifics not found in cited abstracts
 - Score 0-2: Systematic misattributions or fabricated claims
 
-STRICT RULES:
-- Claims with specific numbers (sample sizes, percentages, p-values) MUST be verifiable from the cited abstract. If not verifiable → max score 6
-- Overgeneralization (e.g., citing one study but writing "studies have shown") counts as an inaccuracy
-- "Not verifiable from abstract" for general claims is acceptable, but for specific quantitative claims it is NOT acceptable"""
+GUIDELINES:
+- Claims with specific numbers (sample sizes, percentages, p-values) MUST be verifiable from the cited abstract
+- Synthesized claims citing multiple papers (e.g., "studies have demonstrated [1-3]") are ACCEPTABLE when the cited papers genuinely support the claim
+- General qualitative claims that are consistent with (but not verbatim from) abstracts should NOT be penalized
+- Focus on detecting actual ERRORS and MISREPRESENTATIONS, not on whether every claim is word-for-word verifiable""",
+
+        "originality": """For ORIGINALITY (plagiarism risk — high score = low plagiarism risk):
+- Score 9-10: Fully original phrasing with genuine synthesis across sources. Claims are reframed in the author's own analytical voice
+- Score 7-8: Mostly original. Good synthesis overall. Standard medical terminology and established phrases (e.g., "obstructive sleep apnea", "randomized controlled trial", "major depressive disorder") do NOT count against originality
+- Score 5-6: Multiple non-technical passages are near-verbatim from abstracts. Reads like restated individual abstracts rather than synthesis
+- Score 3-4: Many passages are copied or minimally altered from abstracts. Patchwork of abstract sentences
+- Score 0-2: Extensive verbatim copying from source abstracts
+
+EVALUATION METHOD:
+- EXCLUDE standard medical terms, disease names, methodology names, and established clinical phrases (≤8 words) from consecutive-word matching — these are domain conventions, not plagiarism
+- Focus on whether the ARGUMENT and NARRATIVE are original, not individual phrases
+- Check whether claims are synthesized across sources vs. merely restated from a single abstract""",
+
+        "ai_detectability": """For AI DETECTABILITY (authenticity — high score = reads like human expert writing, low AI detection risk):
+- Score 9-10: Reads like genuine expert academic writing. Varied sentence structure and paragraph rhythm. No repetitive AI patterns
+- Score 7-8: Mostly natural writing. May have 1-2 minor patterns but overall reads authentically. Standard academic transitions ("Furthermore", "Moreover") used appropriately (1-2 times each) are ACCEPTABLE in scholarly writing
+- Score 5-6: Several AI-typical patterns: SAME transition word used 3+ times, every paragraph identical structure, robotic hedging uniformity
+- Score 3-4: Clearly reads like AI-generated text. Multiple telltale patterns throughout
+- Score 0-2: Obviously AI-generated with pervasive patterns
+
+AI-TYPICAL PATTERNS TO CHECK (only flag when EXCESSIVE, not when used naturally):
+- SAME transition word repeated 3+ times (e.g., "Furthermore" appearing 3+ times). Using different transition words is fine
+- Uniform paragraph structure: EVERY paragraph follows IDENTICAL pattern — slight variations are acceptable
+- Hedging uniformity: the EXACT SAME hedging phrase used 4+ times
+- Excessive balance: "While X... Y" pattern used 3+ times
+- List-like structure: "First... Second... Third..." enumeration
+- Uniform sentence length: ALL sentences approximately the same word count (low variance)
+
+NOTE: Standard academic conventions (topic sentences, logical paragraph structure, appropriate hedging) are features of GOOD academic writing, not AI patterns. Only flag when patterns become repetitive and mechanical."""
     }
 
     return guidelines.get(criterion, "Evaluate this criterion fairly and objectively.")

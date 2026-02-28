@@ -38,10 +38,24 @@ def get_writing_strategy_prompt(
 
 {profile["proportion_guide"]}
 
+SYNTHESIS PLANNING GUIDE:
+When planning key_points for each paragraph, formulate them as SYNTHESIZED claims
+that combine findings from multiple papers. Use one of these synthesis patterns:
+
+  CONSENSUS: "Multiple studies agree that X [refs]" — when 3+ papers report similar findings
+  TREND: "The field has evolved from X to Y [refs]" — when papers show temporal progression
+  META-FINDING: "Across N studies, the range of X is Y-Z% [refs]" — when papers report different numbers on the same metric
+  CONVERGENT: "Evidence from both A and B approaches supports X [refs]" — when different methodologies reach similar conclusions
+  LIMITATION-SYNTHESIS: "Existing studies share common constraints including X, Y, Z [refs]" — when multiple papers have similar weaknesses
+
+BAD key_point: "Smith et al. found 85% accuracy using CNN"
+GOOD key_point: {{"claim": "Deep learning approaches have achieved 85-92% accuracy across multiple architectures", "supporting_papers": [1,3,5], "synthesis_pattern": "CONSENSUS"}}
+
 Your task is to create a detailed paragraph-by-paragraph outline with:
 - A clear narrative arc from broad context to specific study rationale
 - Explicit mapping of which references support each paragraph
 - Smooth transition plans between paragraphs
+- key_points as SYNTHESIZED claims (preferably as dict with claim, supporting_papers, synthesis_pattern)
 
 Respond ONLY with valid JSON, no additional text or markdown formatting."""
 
@@ -79,6 +93,8 @@ Your strategy MUST center on "{primary_focus}" specifically, NOT on {disease} in
     if disease_subtypes:
         subtypes_text = "\n- Disease subtypes: " + ", ".join(disease_subtypes[:5])
 
+    additional_context = topic_analysis.get("additional_context", "")
+
     user_prompt = f"""Create a paragraph-by-paragraph writing strategy for an introduction on:
 
 RESEARCH TOPIC:
@@ -88,6 +104,7 @@ RESEARCH TOPIC:
 - Outcome: {topic_analysis.get('outcome', '')}
 - Focus: {topic_analysis.get('key_intervention_or_focus', '')}
 - Primary focus (most specific): {primary_focus}{subtypes_text}
+{f"- Additional context: {additional_context}" if additional_context else ""}
 {f"- Concept hierarchy: {concept_chain}" if concept_chain else ""}
 {focus_constraint}
 LITERATURE LANDSCAPE:
@@ -109,8 +126,12 @@ Return JSON:
         {{
             "paragraph_number": 1,
             "topic": "Disease background & clinical burden",
-            "key_points": ["Point 1", "Point 2", "..."],
-            "supporting_papers": [1, 3, 5],
+            "key_points": [
+                {{"claim": "Synthesized claim text", "supporting_papers": [1, 3, 5], "synthesis_pattern": "CONSENSUS"}},
+                {{"claim": "Another synthesized claim", "supporting_papers": [2, 4], "synthesis_pattern": "TREND"}},
+                "Plain string key_point is also acceptable"
+            ],
+            "supporting_papers": [1, 2, 3, 4, 5],
             "transition_to_next": "How this connects to the next paragraph"
         }},
         ...
@@ -121,12 +142,12 @@ Return JSON:
 }}
 
 REQUIREMENTS:
-- Plan 3-5 paragraphs (target 450-650 words — concise, every sentence must carry weight)
+- Plan 3-5 paragraphs (target 500-600 words — concise, every sentence must carry weight; average 15-25 words per sentence, no sentence exceeding 35 words)
 - Each paragraph must reference at least 3 papers by their [N] number
 - The final paragraph must end with study aims
 - Total planned references should be 10-25 unique papers
 - Narrative must narrow from broad to specific within first 1-2 paragraphs, then STAY specific
-- Narrative arc should flow: disease burden -> limitations -> biomarkers -> methodology -> integration -> study aims
+- Narrative arc should flow: disease burden -> clinical gaps -> prior research landscape (classical, ML/DL, cross-modality findings & limitations) -> current approach rationale -> study aims
 - Content proportions must follow the CONTENT PROPORTION CONSTRAINTS above"""
 
     return system_prompt, user_prompt

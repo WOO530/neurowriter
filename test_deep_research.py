@@ -154,7 +154,7 @@ def test_deep_research_pipeline():
         print("    * 6-step progress display (parsing → analyzing → generating)")
         print("    * Landscape context display (expandable)")
         print("    * Deep research metrics (paper pool size, reference pool size)")
-        print("    * Quality evaluation scores (8 criteria with color coding)")
+        print("    * Quality evaluation scores (10 criteria with color coding)")
         print("    * Improvement suggestions (expandable per criterion)")
         print("    * Literature landscape section (findings & gaps)")
     except Exception as e:
@@ -179,7 +179,7 @@ def test_deep_research_pipeline():
     print("    * Landscape: Synthesized field analysis")
     print("    * References: 30-50 optimized")
     print("    * Generation: Topic-specific + landscape context")
-    print("    * Quality: 8-criterion automated evaluation")
+    print("    * Quality: 10-criterion automated evaluation")
     print("    * UI: Full progress + metrics + suggestions")
 
     print("\n" + "=" * 70)
@@ -208,7 +208,7 @@ def test_deep_research_pipeline():
     print("  [PASS] Landscape Analysis (field synthesis)")
     print("  [PASS] Citation Scorer (4-tier ranking)")
     print("  [PASS] IntroductionGenerator (landscape integration)")
-    print("  [PASS] SelfEvaluator (8-criterion assessment)")
+    print("  [PASS] SelfEvaluator (10-criterion assessment)")
     print("  [PASS] Streamlit UI (progress + results display)")
 
     print("\n" + "=" * 70)

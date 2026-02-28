@@ -9,8 +9,10 @@ from core.pubmed_client import PubmedClient
 from core.intro_generator import IntroductionGenerator
 from core.self_evaluator import SelfEvaluator
 from core.deep_researcher import DeepResearcher
+from core.citation_scorer import CitationScorer
 from prompts.strategy_brief import get_writing_strategy_prompt
 from prompts.claim_extraction import get_claim_extraction_prompt, get_supplementary_query_prompt, get_feedback_to_queries_prompt, get_completeness_gap_prompt
+from prompts.topic_parsing import get_query_regeneration_prompt
 from prompts.modality_config import detect_modality
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,42 @@ class PipelineOrchestrator:
         updated = dict(topic_analysis)
         updated["search_queries"] = [q.strip() for q in edited_queries if q.strip()]
         return updated
+
+    def regenerate_queries(
+        self, topic_analysis: Dict, resolutions: Dict, existing_queries: List[str]
+    ) -> List[str]:
+        """Regenerate search queries after disambiguation resolution
+
+        Uses an LLM prompt to update queries based on the user's
+        clarified research intent.
+
+        Args:
+            topic_analysis: Parsed topic analysis
+            resolutions: Resolved ambiguities {aspect: {"choice": str, "note": str}}
+            existing_queries: Current list of search queries
+
+        Returns:
+            Updated list of search query strings (falls back to existing on failure)
+        """
+        system_prompt, user_prompt = get_query_regeneration_prompt(
+            topic_analysis, resolutions, existing_queries
+        )
+        try:
+            response = self.llm_client.generate(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=0.4,
+                max_tokens=2000,
+                reasoning_effort="medium",
+            )
+            clean = _strip_code_fences(response)
+            data = json.loads(clean)
+            new_queries = data.get("search_queries", [])
+            if new_queries and isinstance(new_queries, list):
+                return [q.strip() for q in new_queries if isinstance(q, str) and q.strip()]
+        except (json.JSONDecodeError, TypeError, Exception) as e:
+            logger.warning(f"Query regeneration failed, keeping existing queries: {e}")
+        return existing_queries
 
     # ------------------------------------------------------------------
     # Research phase
@@ -235,6 +273,7 @@ class PipelineOrchestrator:
         evaluation_feedback: dict = None,
         unsupported_claims: list = None,
         user_feedback: str = "",
+        current_introduction: str = "",
     ) -> str:
         """Generate introduction text"""
         modality = topic_analysis.get("_detected_modality", "eeg")
@@ -244,6 +283,7 @@ class PipelineOrchestrator:
             evaluation_feedback=evaluation_feedback,
             unsupported_claims=unsupported_claims,
             user_feedback=user_feedback,
+            current_introduction=current_introduction,
         )
         return _normalize_paragraph_breaks(text)
 
@@ -254,7 +294,7 @@ class PipelineOrchestrator:
         topic_analysis: Dict,
         landscape: Dict
     ) -> Dict:
-        """Run 8-criterion self-evaluation"""
+        """Run 10-criterion self-evaluation"""
         return self.evaluator.evaluate_introduction(
             introduction, reference_pool, topic_analysis, landscape
         )
@@ -354,33 +394,66 @@ class PipelineOrchestrator:
 
     def generate_supplementary_queries(
         self, claims: List[Dict], topic_analysis: Dict
-    ) -> List[str]:
+    ) -> List[Dict]:
         """Generate targeted PubMed queries for unsupported claims
 
         Returns:
-            List of query strings
+            List of dicts with 'query' and 'rationale' keys
         """
         system_prompt, user_prompt = get_supplementary_query_prompt(claims, topic_analysis)
-        response = self.llm_client.generate(
-            prompt=user_prompt,
-            system_prompt=system_prompt,
-            temperature=0.4,
-            max_tokens=1000,
-            reasoning_effort="medium",
-        )
-        try:
-            clean = _strip_code_fences(response)
-            data = json.loads(clean)
-            return [q["query"] for q in data.get("queries", []) if "query" in q]
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Could not parse supplementary query response")
-            return []
+
+        for attempt in range(2):
+            response = self.llm_client.generate(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=0.4,
+                max_tokens=1500,
+                reasoning_effort="high" if attempt > 0 else "medium",
+            )
+            try:
+                clean = _strip_code_fences(response)
+                data = json.loads(clean)
+                result = [
+                    {"query": q["query"], "rationale": q.get("rationale", "")}
+                    for q in data.get("queries", [])
+                    if "query" in q
+                ]
+                if result:
+                    return result
+            except (json.JSONDecodeError, TypeError):
+                # Fallback: try to extract queries from text with regex
+                queries = _extract_queries_from_text(response)
+                if queries:
+                    logger.info(f"Used fallback query extraction: {len(queries)} queries")
+                    return queries
+                logger.warning(
+                    f"Could not parse supplementary query response (attempt {attempt + 1}/2)"
+                )
+
+        return []
+
+    @staticmethod
+    def _extract_query_strings(queries: List) -> List[str]:
+        """Extract plain query strings from query list (handles both str and dict formats)"""
+        result = []
+        for q in queries:
+            if isinstance(q, dict):
+                result.append(q.get("query", ""))
+            else:
+                result.append(str(q))
+        return [s for s in result if s]
 
     def run_supplementary_search(
-        self, queries: List[str], existing_pool: List[Dict]
+        self, queries: List, existing_pool: List[Dict]
     ) -> List[Dict]:
-        """Run supplementary PubMed searches"""
-        return self.deep_researcher.search_supplementary(queries, existing_pool)
+        """Run supplementary PubMed searches
+
+        Args:
+            queries: List of query strings or dicts with 'query' key
+            existing_pool: Current paper pool to deduplicate against
+        """
+        query_strings = self._extract_query_strings(queries)
+        return self.deep_researcher.search_supplementary(query_strings, existing_pool)
 
     def expand_reference_pool(
         self,
@@ -389,13 +462,18 @@ class PipelineOrchestrator:
         landscape: Dict,
         current_introduction: str = "",
     ) -> List[Dict]:
-        """Expand reference pool with new papers, preserving cited papers
+        """Expand reference pool with new papers using stable merge strategy
 
-        If current_introduction is provided, papers already cited ([N]) are
-        kept at their original positions so citation numbers stay valid.
+        Three-tier approach for deterministic results:
+        1. LOCK: Papers cited in current introduction — never removed
+        2. KEEP: Uncited papers already in pool — retained
+        3. ADD: New papers that score higher than the weakest uncited paper — swap in
+
+        This avoids calling select_reference_pool() which causes
+        non-deterministic re-selection each iteration.
 
         Returns:
-            New reference pool after incorporating new papers
+            Expanded reference pool
         """
         # Identify papers currently cited in the introduction
         cited_indices: set = set()
@@ -404,29 +482,77 @@ class PipelineOrchestrator:
                 for n in _expand_citation_group(m.group(1)):
                     cited_indices.add(n)
 
-        # Separate cited papers (preserve) vs non-cited
+        # LOCK: Cited papers (preserve at original positions)
         cited_papers: List[Dict] = []
         cited_pmids: set = set()
-        for idx in sorted(cited_indices):
-            if 1 <= idx <= len(current_pool):
-                paper = current_pool[idx - 1]
+        uncited_papers: List[Dict] = []
+        pool_pmids: set = set()
+
+        for idx, paper in enumerate(current_pool, 1):
+            pmid = paper.get("pmid")
+            if pmid:
+                pool_pmids.add(pmid)
+            if idx in cited_indices:
                 cited_papers.append(paper)
-                pmid = paper.get("pmid")
                 if pmid:
                     cited_pmids.add(pmid)
+            else:
+                uncited_papers.append(paper)
 
-        # Select from new papers (excluding already cited)
-        combined = current_pool + new_papers
-        reselected = self.deep_researcher.select_reference_pool(combined, landscape)
+        # Score uncited pool papers and new papers for comparison
+        scorer = CitationScorer()
+        for paper in uncited_papers:
+            if "relevance_score" not in paper:
+                paper["relevance_score"] = scorer.score_article(paper)
 
-        # Build final pool: cited first (original order), then new selections
-        additional = [
-            p for p in reselected
-            if p.get("pmid") not in cited_pmids
-        ]
+        # Filter new papers: exclude duplicates already in pool
+        candidates = []
+        for paper in new_papers:
+            pmid = paper.get("pmid")
+            if pmid and pmid not in pool_pmids:
+                if "relevance_score" not in paper:
+                    paper["relevance_score"] = scorer.score_article(paper)
+                candidates.append(paper)
 
-        max_pool = 55
-        final_pool = cited_papers + additional
+        # ADD: Swap in new papers that score >= 90% of weakest uncited (relaxed threshold)
+        # Also allow net growth up to max_pool
+        if uncited_papers and candidates:
+            # Sort uncited by score ascending (weakest first)
+            uncited_papers.sort(key=lambda p: p.get("relevance_score", 0))
+            min_score = uncited_papers[0].get("relevance_score", 0)
+            # Relaxed threshold: new paper needs only 90% of weakest score to swap
+            swap_threshold = min_score * 0.9
+
+            # Sort candidates by score descending (strongest first)
+            candidates.sort(key=lambda p: p.get("relevance_score", 0), reverse=True)
+
+            swapped = 0
+            for candidate in candidates:
+                if candidate.get("relevance_score", 0) > swap_threshold and uncited_papers:
+                    # Replace weakest uncited paper
+                    uncited_papers.pop(0)
+                    uncited_papers.append(candidate)
+                    swapped += 1
+                    # Re-sort after insertion
+                    uncited_papers.sort(key=lambda p: p.get("relevance_score", 0))
+                    min_score = uncited_papers[0].get("relevance_score", 0)
+                    swap_threshold = min_score * 0.9
+                else:
+                    break  # No more candidates beat the threshold
+
+            # Also allow adding top remaining candidates beyond swaps (net growth)
+            remaining = [c for c in candidates if c not in uncited_papers]
+            remaining.sort(key=lambda p: p.get("relevance_score", 0), reverse=True)
+            uncited_papers.extend(remaining[:5])  # Add up to 5 extra papers
+
+            if swapped > 0 or remaining:
+                logger.info(f"Reference pool: swapped {swapped}, added {min(len(remaining), 5)} new papers")
+        elif not uncited_papers:
+            # Pool was entirely cited — just append candidates
+            uncited_papers = candidates
+
+        max_pool = 65
+        final_pool = cited_papers + uncited_papers
         return final_pool[:max_pool]
 
     @staticmethod
@@ -518,6 +644,31 @@ class PipelineOrchestrator:
         reordered.extend(uncited)
 
         return renumbered, reordered
+
+
+def _extract_queries_from_text(text: str) -> List[Dict]:
+    """Fallback: extract PubMed-style queries from unstructured LLM text
+
+    Looks for quoted strings or lines that look like PubMed queries.
+    """
+    if not text:
+        return []
+    queries = []
+    # Try quoted strings first
+    for m in re.finditer(r'"([^"]{10,120})"', text):
+        candidate = m.group(1).strip()
+        # Filter out non-query strings (must contain medical/scientific terms)
+        if any(c in candidate.lower() for c in ["and", "or", "[", "eeg", "sleep", "neural",
+                                                   "brain", "deep learning", "machine learning",
+                                                   "clinical", "disorder", "disease", "treatment"]):
+            queries.append({"query": candidate, "rationale": "extracted from text"})
+    # If no quoted strings, try lines with PubMed-style syntax
+    if not queries:
+        for line in text.split("\n"):
+            line = line.strip().lstrip("0123456789.-) ")
+            if len(line) > 15 and ("AND" in line or "OR" in line or "[" in line):
+                queries.append({"query": line[:150], "rationale": "extracted from text"})
+    return queries[:8]
 
 
 def _expand_citation_group(inner: str) -> list:

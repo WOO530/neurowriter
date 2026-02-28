@@ -1,11 +1,61 @@
 """Topic parser for deep hierarchical analysis"""
 import json
 import logging
+import re
 from typing import Dict
 from core.llm_client import LLMClient, get_llm_client
 from prompts.topic_parsing import get_topic_parsing_prompt, get_landscape_analysis_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def _repair_json(text: str) -> str:
+    """Attempt to repair common LLM JSON errors.
+
+    Applies progressively aggressive fixes:
+    1. Strip code fences
+    2. Remove JS-style comments
+    3. Remove trailing commas before ] or }
+    4. Remove control characters
+    5. Extract first {...} block if surrounded by extra text
+    """
+    if not text:
+        return text
+
+    s = text.strip()
+
+    # 1. Strip code fences
+    if s.startswith("```"):
+        lines = s.split("\n")
+        lines = [l for l in lines if not l.startswith("```")]
+        s = "\n".join(lines).strip()
+
+    # 2. Remove JS-style comments (// to EOL, /* ... */)
+    s = re.sub(r'//[^\n]*', '', s)
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
+
+    # 3. Remove trailing commas before ] or }
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+
+    # 4. Remove control characters except \n and \t
+    s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s)
+
+    # 5. Extract first {...} block if surrounded by extra text
+    match = re.search(r'\{', s)
+    if match and match.start() > 0:
+        s = s[match.start():]
+    if s.startswith('{'):
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            if depth == 0:
+                s = s[:i + 1]
+                break
+
+    return s
 
 
 class TopicParser:
@@ -52,15 +102,32 @@ class TopicParser:
             if not response or not response.strip():
                 raise ValueError("LLM returned empty response for topic analysis")
 
-            # Strip markdown code fences if present
-            clean_response = response.strip()
-            if clean_response.startswith("```"):
-                lines = clean_response.split("\n")
-                json_lines = [l for l in lines if not l.startswith("```")]
-                clean_response = "\n".join(json_lines).strip()
+            # Repair and parse JSON response
+            clean_response = _repair_json(response)
+            try:
+                parsed_data = json.loads(clean_response)
+            except json.JSONDecodeError as e1:
+                logger.warning(f"JSON parse failed (attempt 1): {e1}")
+                logger.debug(f"Cleaned response was: {clean_response[:500]}...")
 
-            # Parse JSON response
-            parsed_data = json.loads(clean_response)
+                # Retry with more deterministic settings
+                try:
+                    response2 = self.llm_client.generate(
+                        prompt=user_prompt,
+                        system_prompt=system_prompt,
+                        temperature=0.2,
+                        max_tokens=3000,
+                        reasoning_effort="high",
+                    )
+                    if response2 and response2.strip():
+                        clean_response2 = _repair_json(response2)
+                        parsed_data = json.loads(clean_response2)
+                    else:
+                        raise json.JSONDecodeError("Empty retry response", "", 0)
+                except json.JSONDecodeError as e2:
+                    logger.warning(f"JSON parse failed (attempt 2): {e2}")
+                    logger.warning("Falling back to minimal topic extraction from raw text")
+                    parsed_data = self._extract_minimal_topic(research_topic, response)
 
             # Sanitize None → defaults (LLM may return "disease": null)
             _str_fields = [
@@ -70,6 +137,7 @@ class TopicParser:
             _list_fields = [
                 "disease_subtypes", "concept_hierarchy", "key_concepts",
                 "knowledge_areas_to_research", "search_queries",
+                "potential_ambiguities",
             ]
             for f in _str_fields:
                 if f in parsed_data and parsed_data[f] is None:
@@ -93,13 +161,76 @@ class TopicParser:
             logger.info(f"Topic parsing completed. Found {len(parsed_data.get('search_queries', []))} search queries")
             return parsed_data
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing LLM response as JSON: {e}")
-            logger.debug(f"Response was: {response[:500]}...")
-            raise ValueError(f"Failed to parse topic analysis: {str(e)}")
         except Exception as e:
             logger.error(f"Error parsing topic: {e}")
             raise
+
+    def _extract_minimal_topic(self, research_topic: str, raw_response: str) -> Dict:
+        """Extract a minimal but usable topic analysis from raw LLM text when JSON parsing fails.
+
+        Uses the original research topic and regex to salvage what we can.
+
+        Args:
+            research_topic: Original user input
+            raw_response: Raw LLM response text
+
+        Returns:
+            Minimal topic analysis dict with required fields
+        """
+        logger.info("Building minimal topic analysis from raw text")
+
+        # Try to extract search queries from raw text (quoted strings or bullet points)
+        queries = []
+        # Match quoted strings that look like search queries
+        quoted = re.findall(r'"([^"]{10,120})"', raw_response or "")
+        for q in quoted:
+            # Filter out things that look like field values rather than queries
+            if any(kw in q.lower() for kw in ["pubmed", "search", "eeg", "psg", "deep learning",
+                                                "classify", "detect", "predict", "diagnos"]):
+                queries.append(q)
+        # Also look for bullet-point style queries
+        bullets = re.findall(r'[-•]\s*(.{10,120}?)(?:\n|$)', raw_response or "")
+        for b in bullets:
+            clean_b = b.strip().strip('"').strip("'")
+            if clean_b and clean_b not in queries:
+                queries.append(clean_b)
+
+        # Limit to reasonable number
+        queries = queries[:20] if queries else [research_topic]
+
+        # Try to extract disease/condition from the topic
+        disease = ""
+        data_type = ""
+        methodology = ""
+        for token in ["EEG", "PSG", "polysomnography", "electroencephalogr"]:
+            if token.lower() in research_topic.lower():
+                data_type = token
+                break
+        for token in ["deep learning", "machine learning", "CNN", "transformer", "neural network"]:
+            if token.lower() in research_topic.lower():
+                methodology = token
+                break
+
+        return {
+            "disease": disease,
+            "disease_subtypes": [],
+            "key_intervention_or_focus": research_topic,
+            "data_type": data_type,
+            "methodology": methodology,
+            "outcome": "",
+            "additional_context": "",
+            "concept_hierarchy": [
+                {"level": "broad", "concept": research_topic}
+            ],
+            "key_concepts": [research_topic],
+            "knowledge_areas_to_research": [
+                "Background and clinical significance",
+                "Current methodology and limitations",
+                "Recent advances and future directions"
+            ],
+            "search_queries": queries,
+            "_fallback": True,
+        }
 
     def analyze_literature_landscape(self, abstracts_by_category: Dict[str, list]) -> Dict:
         """Analyze collected literature to understand the research landscape
@@ -137,6 +268,9 @@ class TopicParser:
                 # Find JSON content between code blocks
                 json_lines = [l for l in lines if not l.startswith("```")]
                 clean_response = "\n".join(json_lines).strip()
+
+            # Fix trailing commas before ] or }
+            clean_response = re.sub(r',\s*([}\]])', r'\1', clean_response)
 
             landscape = json.loads(clean_response)
 

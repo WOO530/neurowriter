@@ -328,6 +328,7 @@ class IntroductionGenerator:
         evaluation_feedback: dict = None,
         unsupported_claims: list = None,
         user_feedback: str = "",
+        current_introduction: str = "",
     ) -> str:
         """Step: Generate introduction text
 
@@ -340,6 +341,7 @@ class IntroductionGenerator:
             evaluation_feedback: Optional evaluation results from previous iteration
             unsupported_claims: Optional list of unsupported claims from previous iteration
             user_feedback: Optional user-provided feedback for revision
+            current_introduction: Optional current introduction text for revision mode
 
         Returns:
             Generated introduction text
@@ -354,6 +356,7 @@ class IntroductionGenerator:
             evaluation_feedback=evaluation_feedback,
             unsupported_claims=unsupported_claims,
             user_feedback=user_feedback,
+            current_introduction=current_introduction,
         )
         return self.llm_client.generate(
             prompt=user_prompt,

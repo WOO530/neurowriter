@@ -1,6 +1,7 @@
 """NeuroWriter - Streamlit Web Application (Interactive Self-Evolving Pipeline)"""
 import streamlit as st
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from core.pipeline_orchestrator import PipelineOrchestrator, MAX_EVOLUTION_ITERATIONS
 from core.fact_checker import FactChecker
@@ -79,6 +80,11 @@ def initialize_session():
         "evolution_completeness_gaps": [],
         "evolution_queries": [],
         "evolution_details": [],
+        # Evaluation error handling
+        "evaluation_error": None,
+        # Topic disambiguation
+        "topic_resolutions": {},
+        "queries_regenerated": False,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -96,6 +102,7 @@ def reset_pipeline():
         "evolution_auto_mode", "user_evolution_feedback",
         "evolution_claims", "evolution_completeness_gaps",
         "evolution_queries", "evolution_details",
+        "evaluation_error", "topic_resolutions", "queries_regenerated",
     ]
     defaults = {
         "pipeline_state": "IDLE",
@@ -119,6 +126,9 @@ def reset_pipeline():
         "evolution_completeness_gaps": [],
         "evolution_queries": [],
         "evolution_details": [],
+        "evaluation_error": None,
+        "topic_resolutions": {},
+        "queries_regenerated": False,
     }
     for k in keys:
         st.session_state[k] = defaults.get(k)
@@ -278,6 +288,7 @@ def setup_sidebar():
                 "CONFIRM_STRATEGY": "전략 확인 대기",
                 "GENERATING": "Introduction 작성 중",
                 "EVALUATING": "품질 평가 중",
+                "EVALUATION_FAILED": "평가 실패",
                 "CONFIRM_EVOLUTION": "개선 확인 대기",
                 "SELF_EVOLVING": "자동 개선 중",
                 "COMPLETE": "완료",
@@ -318,9 +329,9 @@ def render_idle_state():
 
     topic = st.text_area(
         "연구 주제를 한 줄로 입력하세요",
-        placeholder="예: 뇌파 딥러닝 분석 기반 주요우울장애의 항우울제 치료 반응성 예측 연구",
+        placeholder="예: Baseline resting-state EEG와 딥러닝을 이용한 치료저항성 우울증(TRD) 환자의 항우울제 반응 예측",
         height=100,
-        help="질환명, 데이터 유형, 분석 방법, 예측 대상 등을 포함하면 더 좋습니다"
+        help="구체적일수록 좋습니다:\n- 질환명 (구체적 아형 포함)\n- 데이터 유형 (기록 조건 명시)\n- 분석 방법\n- 예측/분류 대상\n\n모호한 부분은 다음 단계에서 확인을 요청합니다."
     )
 
     col1, col2 = st.columns([1, 3])
@@ -399,6 +410,44 @@ def render_confirm_queries_state():
             for concept in concepts[:8]:
                 st.write(f"  - {concept}")
 
+    # Topic ambiguity disambiguation
+    ambiguities = topic_analysis.get("potential_ambiguities", [])
+    if ambiguities:
+        st.markdown("### 주제 해석 확인")
+        st.caption("아래 항목에서 연구 주제의 의도에 맞는 해석을 선택하고, 필요하면 추가 설명을 입력하세요.")
+        resolutions = st.session_state.get("topic_resolutions", {})
+        for i, amb in enumerate(ambiguities):
+            aspect = amb.get("aspect", f"항목 {i+1}")
+            question = amb.get("question", aspect)
+            options = amb.get("options", [])
+            default = amb.get("default", "")
+            reasoning = amb.get("reasoning", "")
+
+            if options:
+                default_idx = 0
+                if default in options:
+                    default_idx = options.index(default)
+                selected = st.radio(
+                    f"**{question}**",
+                    options,
+                    index=default_idx,
+                    key=f"ambiguity_{i}",
+                    help=reasoning,
+                )
+                custom_note = st.text_input(
+                    f"{aspect}에 대한 추가 설명 (선택사항)",
+                    placeholder="연구 의도에 맞게 추가 맥락을 자유롭게 입력하세요",
+                    key=f"ambiguity_note_{i}",
+                )
+                resolutions[aspect] = {"choice": selected, "note": custom_note}
+            else:
+                resolutions[aspect] = {"choice": default, "note": ""}
+        st.session_state.topic_resolutions = resolutions
+
+    # Show banner if queries were regenerated from disambiguation
+    if st.session_state.get("queries_regenerated"):
+        st.info("주제 해석 결과가 반영된 새로운 쿼리입니다. 확인 후 리서치를 시작하세요.")
+
     # Editable search queries
     st.markdown("### 검색 쿼리 (편집 가능)")
     st.caption("한 줄에 하나의 쿼리를 입력하세요. 쿼리를 추가/삭제/수정할 수 있습니다.")
@@ -434,6 +483,37 @@ def render_confirm_queries_state():
         if not orch:
             st.error("API 키를 확인하세요")
             return
+
+        # Apply disambiguation resolutions to topic_analysis
+        resolutions = st.session_state.get("topic_resolutions", {})
+        if resolutions:
+            st.session_state.topic_analysis["resolved_ambiguities"] = resolutions
+            # Build resolution_text from new {choice, note} format
+            resolution_parts = []
+            for aspect, res in resolutions.items():
+                if isinstance(res, dict):
+                    part = f"{aspect}: {res.get('choice', '')}"
+                    if res.get("note"):
+                        part += f" ({res['note']})"
+                else:
+                    part = f"{aspect}: {res}"
+                resolution_parts.append(part)
+            resolution_text = "; ".join(resolution_parts)
+            existing_ctx = st.session_state.topic_analysis.get("additional_context", "")
+            st.session_state.topic_analysis["additional_context"] = (
+                f"{existing_ctx}; {resolution_text}" if existing_ctx else resolution_text
+            )
+
+            # Two-pass flow: regenerate queries on first confirm if not already done
+            if not st.session_state.get("queries_regenerated"):
+                with st.spinner("주제 해석 결과를 반영하여 쿼리를 재생성하고 있습니다..."):
+                    new_queries = orch.regenerate_queries(
+                        st.session_state.topic_analysis, resolutions, edited_queries
+                    )
+                st.session_state.search_queries = new_queries
+                st.session_state.queries_regenerated = True
+                st.rerun()
+                return
 
         st.session_state.topic_analysis = orch.update_queries(
             st.session_state.topic_analysis, edited_queries
@@ -634,6 +714,14 @@ def render_confirm_strategy_state():
         key="strategy_feedback"
     )
 
+    auto_evolve = st.checkbox(
+        "자동 반복 개선 (수동 확인 없이)",
+        value=st.session_state.get("evolution_auto_mode", False),
+        help="활성화하면 품질 평가 후 기준 미달 시 자동으로 개선을 반복합니다",
+        key="auto_evolve_toggle"
+    )
+    st.session_state.evolution_auto_mode = auto_evolve
+
     col1, col2, col3 = st.columns(3)
     with col1:
         generate_btn = st.button("Introduction 작성", key="generate_intro_btn")
@@ -789,7 +877,7 @@ def render_generating_state():
 
 
 def render_evaluating_state():
-    """EVALUATING: Run 8-criterion evaluation (auto-advance)"""
+    """EVALUATING: Run 10-criterion evaluation (auto-advance)"""
     st.markdown("## 품질 평가 중...")
 
     orch = get_orchestrator()
@@ -798,7 +886,7 @@ def render_evaluating_state():
         st.session_state.pipeline_state = "IDLE"
         return
 
-    with st.spinner("8개 기준으로 품질을 평가하고 있습니다..."):
+    with st.spinner("10개 기준으로 품질을 평가하고 있습니다..."):
         try:
             evaluation = orch.evaluate_introduction(
                 st.session_state.introduction_text,
@@ -816,16 +904,35 @@ def render_evaluating_state():
                 )
                 st.session_state.fact_check_result = fact_result
 
-                # Adjust factual_accuracy based on fact-check (soft adjustment)
-                fc_accuracy = fact_result.get("overall_accuracy", "HIGH")
+                # Derive fact-checker score and use the LOWER of evaluator vs fact-checker
+                # (avoids double-counting: both assess the same issues from different angles)
+                claim_mapping = fact_result.get("claim_mapping", {})
                 current_fa = evaluation.get("scores", {}).get("factual_accuracy", 10)
-                if fc_accuracy == "LOW":
-                    adjusted = max(current_fa - 2, 4)
-                elif fc_accuracy == "MEDIUM":
-                    adjusted = max(current_fa - 1, 5)
+                unsupported = [
+                    c for c in claim_mapping.get("claim_mappings", [])
+                    if not c.get("is_supported", True)
+                ]
+                major_mismatches = sum(
+                    1 for nm in claim_mapping.get("numerical_mismatches", [])
+                    if nm.get("severity") == "major"
+                )
+                num_mismatches = len(claim_mapping.get("numerical_mismatches", []))
+                # Compute fact-checker implied score using ratio-based thresholds
+                total_claims = len(claim_mapping.get("claim_mappings", []))
+                unsupported_ratio = len(unsupported) / max(total_claims, 1)
+
+                if major_mismatches >= 3 or unsupported_ratio >= 0.30:
+                    fc_implied = 5      # 30%+ unsupported = severe
+                elif major_mismatches >= 1 or unsupported_ratio >= 0.15 or len(unsupported) >= 5:
+                    fc_implied = 7      # 15-30% unsupported = significant
+                elif len(unsupported) >= 1 or num_mismatches >= 1:
+                    fc_implied = 8      # Minor issues
+                elif num_mismatches == 0 and len(unsupported) == 0:
+                    fc_implied = 9      # No issues
                 else:
-                    adjusted = current_fa
-                evaluation["scores"]["factual_accuracy"] = adjusted
+                    fc_implied = current_fa
+                # Use the LOWER of the two (no additive double-penalty)
+                evaluation["scores"]["factual_accuracy"] = min(current_fa, fc_implied)
 
                 # Recalculate overall score
                 scores = evaluation.get("scores", {})
@@ -846,23 +953,59 @@ def render_evaluating_state():
             })
 
             # Check if self-evolution is needed
-            if (
+            is_first_draft = st.session_state.pipeline_iteration == 0
+            overall = evaluation.get("overall_score", 0)
+            fa = evaluation.get("scores", {}).get("factual_accuracy", 0)
+            auto_mode = st.session_state.get("evolution_auto_mode", False)
+
+            if is_first_draft or (
                 orch.needs_self_evolution(evaluation)
                 and st.session_state.pipeline_iteration < MAX_EVOLUTION_ITERATIONS
             ):
-                if st.session_state.get("evolution_auto_mode", False):
+                if auto_mode:
+                    logger.info(
+                        f"→ SELF_EVOLVING (overall={overall}, fa={fa}, "
+                        f"first_draft={is_first_draft}, auto={auto_mode})"
+                    )
                     st.session_state.pipeline_state = "SELF_EVOLVING"
                 else:
+                    logger.info(
+                        f"→ CONFIRM_EVOLUTION (overall={overall}, fa={fa}, "
+                        f"first_draft={is_first_draft}, auto={auto_mode})"
+                    )
                     st.session_state.pipeline_state = "CONFIRM_EVOLUTION"
             else:
+                logger.info(
+                    f"→ COMPLETE (overall={overall}, fa={fa}, "
+                    f"iteration={st.session_state.pipeline_iteration})"
+                )
                 st.session_state.pipeline_state = "COMPLETE"
 
             st.rerun()
 
         except Exception as e:
-            st.error(f"품질 평가 실패: {str(e)}")
             logger.error(f"Evaluation error: {e}", exc_info=True)
-            # Still go to COMPLETE with what we have
+            st.session_state.evaluation_error = str(e)
+            st.session_state.pipeline_state = "EVALUATION_FAILED"
+            st.rerun()
+
+
+def render_evaluation_failed_state():
+    """EVALUATION_FAILED: Show evaluation error and offer retry or skip"""
+    st.markdown("## 품질 평가 실패")
+
+    error_msg = st.session_state.get("evaluation_error", "알 수 없는 오류")
+    st.error(f"품질 평가 중 오류가 발생했습니다: {error_msg}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("평가 재시도", key="retry_evaluation_btn"):
+            st.session_state.evaluation_error = None
+            st.session_state.pipeline_state = "EVALUATING"
+            st.rerun()
+    with col2:
+        if st.button("평가 없이 완료", key="skip_evaluation_btn"):
+            st.session_state.evaluation_error = None
             st.session_state.pipeline_state = "COMPLETE"
             st.rerun()
 
@@ -920,16 +1063,58 @@ def render_confirm_evolution_state():
                 st.warning(fb)
                 for imp in improvements:
                     if imp.get("criterion") == criterion and imp.get("improvement"):
-                        st.info(f"개선 제안: {imp['improvement']}")
+                        st.info(f"**개선 제안:** {imp['improvement']}")
                         break
 
-    # --- 4. Extract unsupported claims (cache to avoid re-running) ---
-    if not st.session_state.evolution_claims:
+        # 4c: Revision direction summary from weak criteria improvements
+        revision_directions = []
+        for criterion, score, fb in weak:
+            criterion_label = criterion.replace('_', ' ').title()
+            for imp in improvements:
+                if imp.get("criterion") == criterion and imp.get("improvement"):
+                    imp_text = imp["improvement"]
+                    imp_lines = imp_text.strip().split("\n")
+                    header = f"- **{criterion_label}**: {imp_lines[0]}"
+                    if len(imp_lines) > 1:
+                        continuation = "\n".join(f"  {line}" for line in imp_lines[1:])
+                        revision_directions.append(f"{header}\n{continuation}")
+                    else:
+                        revision_directions.append(header)
+                    break
+        if revision_directions:
+            st.markdown("**수정 방향 요약:**\n\n" + "\n\n".join(revision_directions))
+
+    # --- 4. Extract unsupported claims + completeness gaps (parallel, cached) ---
+    need_claims = not st.session_state.evolution_claims
+    comp_score = scores.get("completeness", 10)
+    need_gaps = not st.session_state.get("evolution_completeness_gaps") and comp_score < 8
+
+    if need_claims and need_gaps:
+        # Both uncached — run in parallel
+        with st.spinner("미지지 클레임 + Completeness gap 분석 중..."):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f_claims = executor.submit(
+                    orch.extract_unsupported_claims,
+                    evaluation, st.session_state.introduction_text
+                )
+                f_gaps = executor.submit(
+                    orch.extract_completeness_gaps,
+                    evaluation, st.session_state.introduction_text,
+                    st.session_state.landscape
+                )
+                st.session_state.evolution_claims = f_claims.result()
+                st.session_state.evolution_completeness_gaps = f_gaps.result()
+    elif need_claims:
         with st.spinner("미지지 클레임 분석 중..."):
-            claims = orch.extract_unsupported_claims(
+            st.session_state.evolution_claims = orch.extract_unsupported_claims(
                 evaluation, st.session_state.introduction_text
             )
-            st.session_state.evolution_claims = claims
+    elif need_gaps:
+        with st.spinner("Completeness gap 분석 중..."):
+            st.session_state.evolution_completeness_gaps = orch.extract_completeness_gaps(
+                evaluation, st.session_state.introduction_text,
+                st.session_state.landscape
+            )
 
     claims = st.session_state.evolution_claims
     if claims:
@@ -946,16 +1131,6 @@ def render_confirm_evolution_state():
                     st.write(f"**필요한 근거:** {needed}")
     else:
         st.info("미지지 클레임이 발견되지 않았습니다.")
-
-    # --- 4b. Extract completeness gaps (cache to avoid re-running) ---
-    comp_score = scores.get("completeness", 10)
-    if not st.session_state.get("evolution_completeness_gaps") and comp_score < 8:
-        with st.spinner("Completeness gap 분석 중..."):
-            comp_gaps = orch.extract_completeness_gaps(
-                evaluation, st.session_state.introduction_text,
-                st.session_state.landscape
-            )
-            st.session_state.evolution_completeness_gaps = comp_gaps
 
     comp_gaps = st.session_state.get("evolution_completeness_gaps", [])
     if comp_gaps:
@@ -988,7 +1163,14 @@ def render_confirm_evolution_state():
     if queries:
         st.markdown(f"### 보충 검색 쿼리 계획 ({len(queries)}개)")
         for i, q in enumerate(queries, 1):
-            st.write(f"  {i}. `{q}`")
+            if isinstance(q, dict):
+                query_str = q.get("query", "")
+                rationale = q.get("rationale", "")
+                with st.expander(f"{i}. `{query_str}`", expanded=False):
+                    if rationale:
+                        st.write(f"**근거:** {rationale}")
+            else:
+                st.write(f"  {i}. `{q}`")
 
     # --- 6. User feedback input ---
     st.markdown("### 사용자 피드백 (선택사항)")
@@ -1046,90 +1228,133 @@ def render_self_evolving_state():
 
     try:
         with status_container:
-            # Step 1: Extract unsupported claims (reuse cache if available)
+            # Step 1 + 1b: Extract unsupported claims and completeness gaps
             cached_claims = st.session_state.get("evolution_claims", [])
-            if cached_claims:
-                claims = cached_claims
-                st.write(f"캐시된 미지지 클레임 사용: {len(claims)}개")
-            else:
-                st.write("미지지 클레임 추출 중...")
-                claims = orch.extract_unsupported_claims(
-                    st.session_state.evaluation_result,
-                    st.session_state.introduction_text
-                )
-                st.write(f"  {len(claims)}개 미지지 클레임 발견")
-
-            # Step 1b: Extract completeness gaps (reuse cache if available)
             cached_comp_gaps = st.session_state.get("evolution_completeness_gaps", [])
-            if cached_comp_gaps:
-                comp_gaps = cached_comp_gaps
-                st.write(f"캐시된 completeness gap 사용: {len(comp_gaps)}개")
+            need_claims = not cached_claims
+            need_gaps = not cached_comp_gaps
+
+            if need_claims and need_gaps:
+                # Both uncached — run in parallel
+                st.write("미지지 클레임 + Completeness gap 추출 중 (병렬)...")
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    f_claims = executor.submit(
+                        orch.extract_unsupported_claims,
+                        st.session_state.evaluation_result,
+                        st.session_state.introduction_text
+                    )
+                    f_gaps = executor.submit(
+                        orch.extract_completeness_gaps,
+                        st.session_state.evaluation_result,
+                        st.session_state.introduction_text,
+                        st.session_state.landscape,
+                    )
+                    claims = f_claims.result()
+                    comp_gaps = f_gaps.result()
+                st.write(f"  {len(claims)}개 클레임, {len(comp_gaps)}개 gap 발견")
             else:
-                st.write("Completeness gap 추출 중...")
-                comp_gaps = orch.extract_completeness_gaps(
-                    st.session_state.evaluation_result,
-                    st.session_state.introduction_text,
-                    st.session_state.landscape,
-                )
-                if comp_gaps:
-                    st.write(f"  {len(comp_gaps)}개 completeness gap 발견")
+                if cached_claims:
+                    claims = cached_claims
+                    st.write(f"캐시된 미지지 클레임 사용: {len(claims)}개")
                 else:
-                    st.write("  Completeness gap 없음 (점수 충분)")
+                    st.write("미지지 클레임 추출 중...")
+                    claims = orch.extract_unsupported_claims(
+                        st.session_state.evaluation_result,
+                        st.session_state.introduction_text
+                    )
+                    st.write(f"  {len(claims)}개 미지지 클레임 발견")
+
+                if cached_comp_gaps:
+                    comp_gaps = cached_comp_gaps
+                    st.write(f"캐시된 completeness gap 사용: {len(comp_gaps)}개")
+                else:
+                    st.write("Completeness gap 추출 중...")
+                    comp_gaps = orch.extract_completeness_gaps(
+                        st.session_state.evaluation_result,
+                        st.session_state.introduction_text,
+                        st.session_state.landscape,
+                    )
+                    if comp_gaps:
+                        st.write(f"  {len(comp_gaps)}개 completeness gap 발견")
+                    else:
+                        st.write("  Completeness gap 없음 (점수 충분)")
 
             if not claims and not comp_gaps:
-                st.write("개선할 항목이 없습니다. 완료로 이동합니다.")
-                st.session_state.pipeline_state = "COMPLETE"
-                st.rerun()
-                return
-
-            # Step 2: Generate supplementary queries (reuse cache if available)
-            # Merge claims + completeness gaps for query generation
-            all_items_for_queries = list(claims) + orch._completeness_gaps_as_claims(comp_gaps)
-            cached_queries = st.session_state.get("evolution_queries", [])
-            if cached_queries:
-                queries = cached_queries
-                st.write(f"캐시된 보충 쿼리 사용: {len(queries)}개")
-            else:
-                st.write("보충 쿼리 생성 중...")
-                queries = orch.generate_supplementary_queries(
-                    all_items_for_queries, st.session_state.topic_analysis
-                )
-                st.write(f"  {len(queries)}개 보충 쿼리 생성")
-
-            # Step 3: Search PubMed
-            st.write("PubMed 보충 검색 중...")
-            new_papers = orch.run_supplementary_search(
-                queries, st.session_state.paper_pool
-            )
-            st.write(f"  {len(new_papers)}편 새 논문 발견")
-
-            # Step 4: Expand reference pool (preserve cited papers)
-            if new_papers:
-                st.write("Reference pool 확장 중...")
-                st.session_state.paper_pool = st.session_state.paper_pool + new_papers
-                new_ref_pool = orch.expand_reference_pool(
+                # No specific claims/gaps, but scores still below threshold.
+                # Fallback: regenerate using evaluation feedback only (skip supplementary search).
+                st.write("구체적 클레임/gap 없음 — 평가 피드백 기반으로 재작성합니다.")
+                if user_feedback:
+                    st.write(f"사용자 피드백 반영: \"{user_feedback[:60]}{'...' if len(user_feedback) > 60 else ''}\"")
+                introduction = orch.generate_introduction(
+                    st.session_state.topic_analysis,
                     st.session_state.reference_pool,
-                    new_papers,
                     st.session_state.landscape,
+                    writing_strategy=st.session_state.get("writing_strategy"),
+                    evaluation_feedback=st.session_state.get("evaluation_result"),
+                    unsupported_claims=[],
+                    user_feedback=user_feedback,
                     current_introduction=st.session_state.introduction_text,
                 )
-                old_size = len(st.session_state.reference_pool)
-                st.session_state.reference_pool = new_ref_pool
-                st.write(f"  Reference pool: {old_size} -> {len(new_ref_pool)}편")
+                queries = []
+                new_papers = []
+                comp_gaps = []
+            else:
+                # Step 2: Generate supplementary queries (reuse cache if available)
+                # Merge claims + completeness gaps for query generation
+                all_items_for_queries = list(claims) + orch._completeness_gaps_as_claims(comp_gaps)
+                cached_queries = st.session_state.get("evolution_queries", [])
+                if cached_queries:
+                    queries = cached_queries
+                    st.write(f"캐시된 보충 쿼리 사용: {len(queries)}개")
+                else:
+                    st.write("보충 쿼리 생성 중...")
+                    queries = orch.generate_supplementary_queries(
+                        all_items_for_queries, st.session_state.topic_analysis
+                    )
+                    st.write(f"  {len(queries)}개 보충 쿼리 생성")
 
-            # Step 5: Regenerate introduction with feedback
-            if user_feedback:
-                st.write(f"사용자 피드백 반영: \"{user_feedback[:60]}{'...' if len(user_feedback) > 60 else ''}\"")
-            st.write("Introduction 재작성 중...")
-            introduction = orch.generate_introduction(
-                st.session_state.topic_analysis,
-                st.session_state.reference_pool,
-                st.session_state.landscape,
-                writing_strategy=st.session_state.get("writing_strategy"),
-                evaluation_feedback=st.session_state.get("evaluation_result"),
-                unsupported_claims=claims,
-                user_feedback=user_feedback,
-            )
+                # Step 3: Search PubMed
+                st.write("PubMed 보충 검색 중...")
+                new_papers = orch.run_supplementary_search(
+                    queries, st.session_state.paper_pool
+                )
+                st.write(f"  {len(new_papers)}편 새 논문 발견")
+
+                # Step 4: Expand reference pool (preserve cited papers)
+                if new_papers:
+                    st.write("Reference pool 확장 중...")
+                    st.session_state.paper_pool = st.session_state.paper_pool + new_papers
+                    new_ref_pool = orch.expand_reference_pool(
+                        st.session_state.reference_pool,
+                        new_papers,
+                        st.session_state.landscape,
+                        current_introduction=st.session_state.introduction_text,
+                    )
+                    old_size = len(st.session_state.reference_pool)
+                    st.session_state.reference_pool = new_ref_pool
+                    st.write(f"  Reference pool: {old_size} -> {len(new_ref_pool)}편")
+
+                    # Refresh landscape if new papers exceed 20% of pool
+                    if len(new_papers) > len(new_ref_pool) * 0.2:
+                        st.write("  Landscape 갱신 중 (새 논문 비율 > 20%)...")
+                        st.session_state.landscape = orch.intro_generator.step_analyze_landscape(
+                            st.session_state.paper_pool, st.session_state.current_topic
+                        )
+
+                # Step 5: Regenerate introduction with feedback
+                if user_feedback:
+                    st.write(f"사용자 피드백 반영: \"{user_feedback[:60]}{'...' if len(user_feedback) > 60 else ''}\"")
+                st.write("Introduction 재작성 중...")
+                introduction = orch.generate_introduction(
+                    st.session_state.topic_analysis,
+                    st.session_state.reference_pool,
+                    st.session_state.landscape,
+                    writing_strategy=st.session_state.get("writing_strategy"),
+                    evaluation_feedback=st.session_state.get("evaluation_result"),
+                    unsupported_claims=claims,
+                    user_feedback=user_feedback,
+                    current_introduction=st.session_state.introduction_text,
+                )
             # Validate citation range and renumber
             introduction = PipelineOrchestrator.validate_citation_range(
                 introduction, len(st.session_state.reference_pool)
@@ -1141,6 +1366,7 @@ def render_self_evolving_state():
             st.session_state.introduction_text = introduction
 
         # Record evolution details for history
+        fallback = not claims and not comp_gaps
         st.session_state.setdefault("evolution_details", []).append({
             "iteration": iteration,
             "claims_found": len(claims),
@@ -1150,6 +1376,7 @@ def render_self_evolving_state():
             "queries_used": queries,
             "new_papers_found": len(new_papers),
             "user_feedback": user_feedback,
+            "fallback": fallback,
         })
 
         # Clear cached claims/queries/feedback for next iteration
@@ -1255,6 +1482,8 @@ def render_complete_state(reference_style: str = "APA"):
     evaluation = st.session_state.evaluation_result
     if evaluation:
         display_self_evaluation_results(evaluation)
+    else:
+        st.warning("품질 평가 데이터가 없습니다.")
 
     # Auto fact-check results
     fact_result = st.session_state.get("fact_check_result")
@@ -1442,10 +1671,10 @@ def display_self_evaluation_results(evaluation: dict):
     # Detailed scores
     st.markdown("### 세부 점수")
     scores = evaluation.get("scores", {})
-    cols = st.columns(4)
+    cols = st.columns(5)
     criteria = list(scores.items())
     for i, (criterion, score) in enumerate(criteria):
-        col_idx = i % 4
+        col_idx = i % 5
         with cols[col_idx]:
             if score >= 8:
                 emoji = "✅"
@@ -1690,6 +1919,8 @@ def main():
         render_generating_state()
     elif state == "EVALUATING":
         render_evaluating_state()
+    elif state == "EVALUATION_FAILED":
+        render_evaluation_failed_state()
     elif state == "CONFIRM_EVOLUTION":
         render_confirm_evolution_state()
     elif state == "SELF_EVOLVING":

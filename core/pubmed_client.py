@@ -2,6 +2,7 @@
 import requests
 import time
 import logging
+import threading
 from typing import List, Dict, Optional
 from utils.pubmed_utils import parse_pubmed_xml, has_valid_abstract
 from utils.cache import PubmedCache
@@ -24,13 +25,15 @@ class PubmedClient:
         self.delay = config.PUBMED_DELAY
         self.cache = cache or PubmedCache()
         self.last_request_time = 0
+        self._throttle_lock = threading.Lock()
 
     def _throttle_request(self):
-        """Implement rate limiting for API requests"""
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
-        self.last_request_time = time.time()
+        """Implement rate limiting for API requests (thread-safe)"""
+        with self._throttle_lock:
+            elapsed = time.time() - self.last_request_time
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self.last_request_time = time.time()
 
     def search_pubmed(self, query: str, category: str, max_results: int = 20) -> List[str]:
         """Search PubMed and return list of PMIDs
@@ -80,7 +83,10 @@ class PubmedClient:
         return pmids
 
     def fetch_article_details(self, pmids: List[str]) -> List[Dict]:
-        """Fetch detailed metadata for articles
+        """Fetch detailed metadata for articles using batch efetch
+
+        PubMed efetch supports comma-separated PMIDs. We batch 20 at a time
+        to reduce HTTP requests from N to N/20.
 
         Args:
             pmids: List of PMIDs
@@ -89,44 +95,65 @@ class PubmedClient:
             List of article metadata dictionaries
         """
         articles = []
+        uncached_pmids = []
 
+        # 1. Check cache first for all PMIDs
         for pmid in pmids:
-            # Check cache first
             cached_article = self.cache.get_article(pmid)
             if cached_article:
                 articles.append(cached_article)
-                continue
+            else:
+                uncached_pmids.append(pmid)
 
+        if not uncached_pmids:
+            return articles
+
+        # 2. Fetch uncached PMIDs in batches of 20
+        batch_size = 20
+        for i in range(0, len(uncached_pmids), batch_size):
+            batch = uncached_pmids[i:i + batch_size]
             try:
                 self._throttle_request()
 
-                # Use efetch to get full article metadata
                 fetch_url = f"{self.base_url}efetch.fcgi"
                 params = {
                     "db": "pubmed",
-                    "id": pmid,
+                    "id": ",".join(batch),
                     "rettype": "xml",
                 }
 
-                response = requests.get(fetch_url, params=params, timeout=10)
+                response = requests.get(fetch_url, params=params, timeout=15)
                 response.raise_for_status()
 
-                # Parse XML response
                 parsed_articles = parse_pubmed_xml(response.text)
 
-                if parsed_articles:
-                    article = parsed_articles[0]
-                    # Cache the article
+                for article in parsed_articles:
                     self.cache.cache_article(article)
-                    # Skip articles without valid abstract
                     if not has_valid_abstract(article):
-                        logger.debug(f"Skipping PMID {pmid}: no valid abstract")
+                        logger.debug(f"Skipping PMID {article.get('pmid', '?')}: no valid abstract")
                         continue
                     articles.append(article)
-                    logger.info(f"Retrieved details for PMID: {pmid}")
+
+                logger.info(f"Batch fetched {len(parsed_articles)} articles ({len(batch)} PMIDs)")
 
             except Exception as e:
-                logger.error(f"Error fetching article {pmid}: {e}")
+                logger.error(f"Error batch-fetching PMIDs {batch[:3]}...: {e}")
+                # Fallback: try individually for this batch
+                for pmid in batch:
+                    try:
+                        self._throttle_request()
+                        fetch_url = f"{self.base_url}efetch.fcgi"
+                        resp = requests.get(fetch_url, params={
+                            "db": "pubmed", "id": pmid, "rettype": "xml"
+                        }, timeout=10)
+                        resp.raise_for_status()
+                        parsed = parse_pubmed_xml(resp.text)
+                        if parsed:
+                            self.cache.cache_article(parsed[0])
+                            if has_valid_abstract(parsed[0]):
+                                articles.append(parsed[0])
+                    except Exception as e2:
+                        logger.error(f"Error fetching article {pmid}: {e2}")
 
         return articles
 
